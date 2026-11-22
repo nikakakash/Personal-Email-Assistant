@@ -43,11 +43,12 @@ once and nothing more is written for the job: another worker may own it now, and
 must never drive the same thread.
 
 Job outcomes: success → projection, then `done`. `ActionInFlight` → the same job is queued
-again `IN_FLIGHT_RETRY` later (not a failure). `LLMTransientError` → the client already made
-its bounded attempts, so the run is `failed` (`llm_transient`) and the job fails without a
-retry. Any other exception → the run is `failed` (`internal_error`); the traceback goes to the
-server log, never into events or the job row. A job claimed `MAX_JOB_ATTEMPTS` times without
-finishing is failed by `claim` itself (`max_attempts`), and its run with it.
+again `IN_FLIGHT_RETRY` later (not a failure, and not counted as an attempt). `LLMTransientError`
+→ the client already made its bounded attempts, so the run is `failed` (`llm_transient`) and the
+job fails without a retry. Any other exception → the run is `failed` (`internal_error`); the
+traceback goes to the server log, never into events or the job row. A job claimed
+`MAX_JOB_ATTEMPTS` times without finishing (its workers kept dying) is failed by `claim` itself
+(`max_attempts`), and its run with it (`outcome_unknown` if an action may have been sent).
 """
 
 import asyncio
@@ -70,7 +71,17 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import Settings
-from app.db.models import AppFlags, EmailMessage, EmailThread, Job, WorkflowRun
+from app.db.models import (
+    Action,
+    AppFlags,
+    Approval,
+    EmailMessage,
+    EmailThread,
+    Job,
+    Proposal,
+    ProposalRevision,
+    WorkflowRun,
+)
 from app.graphs.deps import GraphDeps
 from app.graphs.events import emit
 from app.graphs.nodes.execute import ActionInFlight
@@ -278,19 +289,58 @@ async def _set_run_outcome(
         await emit(session, workflow_id, "run_failed", {"status": status, "error_code": error_code})
 
 
-async def fail_exhausted_run(session: AsyncSession, job: Job) -> None:
-    """`claim` gave up on `job` (too many attempts): fail its run too, if it has one."""
-    workflow_id: uuid.UUID | None = None
-    if "workflow_id" in job.payload:
-        workflow_id = uuid.UUID(str(job.payload["workflow_id"]))
-    elif {"account_id", "provider_message_id"} <= job.payload.keys():
-        thread_id = graph_thread_id(job.payload["account_id"], job.payload["provider_message_id"])
-        workflow_id = await session.scalar(
+async def _exhausted_run_id(session: AsyncSession, payload: dict[str, Any]) -> uuid.UUID | None:
+    """The run a job acts on: `workflow_id` (resume jobs) or the thread id (start jobs)."""
+    if "workflow_id" in payload:
+        return uuid.UUID(str(payload["workflow_id"]))
+    if {"account_id", "provider_message_id"} <= payload.keys():
+        thread_id = graph_thread_id(payload["account_id"], payload["provider_message_id"])
+        return await session.scalar(
             select(WorkflowRun.id).where(WorkflowRun.graph_thread_id == thread_id)
         )
-    log.error("job %s (%s) failed after %d attempts", job.id, job.kind, job.attempts)
-    if workflow_id is not None:
-        await _set_run_outcome(session, workflow_id, "failed", "internal_error")
+    return None
+
+
+async def _has_unresolved_action(session: AsyncSession, workflow_id: uuid.UUID) -> bool:
+    """Whether some action of the run may or may not have reached the provider."""
+    found = await session.scalar(
+        select(Action.id)
+        .join(Approval, Action.approval_id == Approval.id)
+        .join(ProposalRevision, Approval.proposal_revision_id == ProposalRevision.id)
+        .join(Proposal, ProposalRevision.proposal_id == Proposal.id)
+        .where(
+            Proposal.workflow_id == workflow_id,
+            Action.status.in_(("executing", "outcome_unknown")),
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
+async def fail_exhausted_run(session: AsyncSession, job: Job) -> None:
+    """`claim` gave up on `job` (too many attempts): fail its run too, if it has one.
+
+    The error code is `outcome_unknown` if one of the run's actions is still `executing` or
+    `outcome_unknown` (the write may have happened, so the owner must check), otherwise
+    `internal_error`. A final run is left alone.
+
+    This runs inside the claim's transaction, so it must never raise: a failure here would roll
+    back the claim, leave the job runnable and wedge every later claim on it. Its writes go in
+    a savepoint (`begin_nested`), so on any error only they are undone, the error is logged,
+    and the job is still marked `failed`.
+    """
+    job_id, kind, attempts, payload = job.id, job.kind, job.attempts, dict(job.payload)
+    log.error("job %s (%s) failed after %d attempts", job_id, kind, attempts)
+    try:
+        async with session.begin_nested():
+            workflow_id = await _exhausted_run_id(session, payload)
+            if workflow_id is None:
+                return
+            unresolved = await _has_unresolved_action(session, workflow_id)
+            code = "outcome_unknown" if unresolved else "internal_error"
+            await _set_run_outcome(session, workflow_id, "failed", code)
+    except Exception:
+        log.exception("job %s (%s): could not fail the run of an exhausted job", job_id, kind)
 
 
 async def _work(graph: Graph, deps: GraphDeps, job: Job) -> tuple[str, _Target | None]:

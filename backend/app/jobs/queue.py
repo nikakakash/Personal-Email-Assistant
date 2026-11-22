@@ -76,7 +76,8 @@ async def claim(
     A runnable job already claimed `MAX_JOB_ATTEMPTS` times is not claimed again: it is marked
     `failed` (`max_attempts`), `on_exhausted(session, job)` runs in the same transaction (the
     worker fails the job's run there), and the next runnable job is tried. This stops a job
-    that crashes its worker every time from being retried forever.
+    that crashes its worker every time from being retried forever. `reschedule` undoes its
+    claim's increment, so only claims that ended in a crash or a failure count.
 
     `FOR UPDATE SKIP LOCKED` makes concurrent claimers skip a row another transaction is
     claiming instead of waiting for it. The serial-key check reads *other* rows, though, and
@@ -195,7 +196,11 @@ async def reschedule(
 ) -> bool:
     """Queue the job again `delay` from now without recording a failure.
 
-    `attempts` keeps the count the claim set. False if the lease was lost.
+    The worker uses this when the job must wait for someone else (an action another caller is
+    executing), which is not an attempt: the claim's increment is undone, so waiting never
+    counts toward `MAX_JOB_ATTEMPTS`. A crash still counts, since a crashed worker never gets
+    here. The decrement is part of the same compare-and-set on the lease owner. False if the
+    lease was lost.
     """
     result = await session.execute(
         update(Job)
@@ -206,6 +211,7 @@ async def reschedule(
             lease_owner=None,
             lease_until=None,
             error=None,
+            attempts=Job.attempts - 1,
         )
         .returning(Job.id)
     )

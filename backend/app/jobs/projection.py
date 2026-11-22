@@ -25,7 +25,16 @@ subgraph node finishes: the parent only checkpoints between its own steps. So af
 that answered the interrupt and then crashed inside the subgraph (say, during `preflight`),
 the parent still shows the interrupt as pending while the subgraph, which has moved on,
 shows none. Only the subgraph's view is current, so for a task that has a subgraph state the
-walk uses that state and ignores the parent's copy.
+walk uses that state and ignores the parent's copy. An interrupt raised by a parent node
+itself (`notification_interrupt`) is on a task without a subgraph state, so it is read there.
+
+The invariant this relies on: interrupts are raised only by leaf nodes (nodes that are plain
+functions), and every subgraph is added to its parent directly as a compiled graph
+(`g.add_node("response", build_response_graph().compile())`). LangGraph then recognises the
+node as a subgraph and `subgraphs=True` fills `task.state`. If a subgraph were wrapped in a
+function node (`async def response(state): return await sub.ainvoke(state)`), `task.state`
+would stay empty, that task would look like a leaf, and the walk would trust the parent's
+possibly stale copy of the subgraph's interrupt. Do not wrap subgraphs.
 
 While the run is paused inside the subgraph, the parent's `snap.values` do not include the
 subgraph's updates (they flow back only when the subgraph finishes), so the review item id is

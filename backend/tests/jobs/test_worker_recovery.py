@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import pytest
 from langgraph.types import Command
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.__main__ import main
@@ -32,9 +32,10 @@ from app.db.models import (
     WorkflowRun,
 )
 from app.graphs.deps import GraphDeps
+from app.graphs.nodes.notify import notification_item_id
 from app.graphs.parent import GRAPH_VERSION
 from app.ingestion.ingest import ingest_message
-from app.jobs import queue
+from app.jobs import queue, worker
 from app.jobs.projection import pending_interrupts
 from app.jobs.queue import MAX_JOB_ATTEMPTS, claim, enqueue
 from app.jobs.worker import Graph, fail_exhausted_run, run_once
@@ -160,6 +161,64 @@ async def _pause_for_approval(sessionmaker: Session, make_deps: DepsBuilder, url
         assert await _work(graph, make_deps(BEFORE_APPROVAL))
 
 
+async def _action_in_flight(
+    sessionmaker: Session, owner_id: uuid.UUID, mail: MockMailProvider, status: str = "executing"
+) -> uuid.UUID:
+    """Approve the pending proposal, then record its action as `status` by another caller."""
+    proposal_id, body = await _decision(sessionmaker)
+    async with sessionmaker() as s:
+        outcome = await decide_proposal(s, owner_id, proposal_id, body, mail=mail)
+    action_id = uuid.uuid4()
+    async with sessionmaker() as s, s.begin():
+        s.add(
+            Action(
+                id=action_id,
+                operation_id=operation_id_for(proposal_id, outcome.revision),
+                approval_id=outcome.approval_id,
+                kind="send_reply",
+                request_fingerprint="in-flight",
+                status=status,
+                attempts=1,
+                updated_at=datetime.now(UTC),
+            )
+        )
+    return action_id
+
+
+async def _make_due(sessionmaker: Session, job_id: uuid.UUID) -> None:
+    async with sessionmaker() as s, s.begin():
+        await s.execute(update(Job).where(Job.id == job_id).values(scheduled_at=func.now()))
+
+
+async def _exhaust(sessionmaker: Session, job_id: uuid.UUID) -> None:
+    """The job has crashed its worker MAX_JOB_ATTEMPTS times; its last lease has expired."""
+    async with sessionmaker() as s, s.begin():
+        await s.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(
+                state="running",
+                attempts=MAX_JOB_ATTEMPTS,
+                lease_owner="w-dead",
+                lease_until=func.now() - LEASE,
+                scheduled_at=func.now() - 2 * LEASE,  # claimed ahead of any job queued now
+            )
+        )
+
+
+async def _claim_exhausting(sessionmaker: Session) -> Job | None:
+    async with sessionmaker() as s, s.begin():
+        return await claim(s, "w2", LEASE, on_exhausted=fail_exhausted_run)
+
+
+async def _run_failed_payloads(sessionmaker: Session) -> list[dict[str, Any]]:
+    async with sessionmaker() as s:
+        rows = await s.execute(
+            select(WorkflowEvent.payload).where(WorkflowEvent.event_type == "run_failed")
+        )
+        return list(rows.scalars())
+
+
 class CountingLLM:
     def __init__(self, exc: Exception) -> None:
         self.exc = exc
@@ -232,6 +291,29 @@ async def test_projection_sets_interrupt_id_for_subgraph_interrupt(
     async with sessionmaker() as s:
         item = await s.get_one(ReviewItem, uuid.UUID(interrupt.value["review_item_id"]))
     assert (item.kind, item.status, item.interrupt_id) == ("proposal", "pending", interrupt.id)
+    assert run.status == "waiting_review"
+
+
+async def test_projection_sets_interrupt_id_for_parent_interrupt(
+    sessionmaker: Session, make_deps: DepsBuilder, worker_settings: Any
+) -> None:
+    url = worker_settings.checkpoint_database_url
+    await _ingest(sessionmaker)
+    triage = dict(BEFORE_APPROVAL[MID]["triage"][0], classification="notify")
+    async with open_graph(url) as graph:
+        assert await _work(graph, make_deps({MID: {"triage": [triage]}}))
+        run = await _run(sessionmaker)
+        snap = await graph.aget_state(
+            {"configurable": {"thread_id": run.graph_thread_id}}, subgraphs=True
+        )
+    # The notification interrupt is raised by a leaf node of the parent graph itself.
+    assert snap.next == ("notification_interrupt",)
+    (interrupt,) = pending_interrupts(snap)
+    item_id = notification_item_id(str(run.id))
+    assert interrupt.value == {"type": "notification", "review_item_id": str(item_id)}
+    async with sessionmaker() as s:
+        item = await s.get_one(ReviewItem, item_id)
+    assert (item.kind, item.status, item.interrupt_id) == ("notification", "pending", interrupt.id)
     assert run.status == "waiting_review"
 
 
@@ -347,23 +429,7 @@ async def test_resume_continues_after_action_in_flight(
     owner_id = owner.id
     url = worker_settings.checkpoint_database_url
     await _pause_for_approval(sessionmaker, make_deps, url)
-    proposal_id, body = await _decision(sessionmaker)
-    async with sessionmaker() as s:
-        outcome = await decide_proposal(s, owner_id, proposal_id, body, mail=mail)
-    action_id = uuid.uuid4()
-    async with sessionmaker() as s, s.begin():  # another caller is sending right now
-        s.add(
-            Action(
-                id=action_id,
-                operation_id=operation_id_for(proposal_id, outcome.revision),
-                approval_id=outcome.approval_id,
-                kind="send_reply",
-                request_fingerprint="in-flight",
-                status="executing",
-                attempts=1,
-                updated_at=datetime.now(UTC),
-            )
-        )
+    action_id = await _action_in_flight(sessionmaker, owner_id, mail)  # another caller sends
 
     async with open_graph(url) as graph:
         deps = make_deps(AFTER_APPROVAL)
@@ -375,7 +441,8 @@ async def test_resume_continues_after_action_in_flight(
                 await s.execute(select(Job.scheduled_at, func.now()).where(Job.id == job.id))
             ).one()
         wait = due_at - db_now
-        assert (job.state, job.attempts, job.error, job.lease_owner) == ("queued", 1, None, None)
+        # Waiting for another caller is not an attempt: the claim's increment is undone.
+        assert (job.state, job.attempts, job.error, job.lease_owner) == ("queued", 0, None, None)
         assert timedelta(seconds=25) < wait <= timedelta(seconds=30)
         assert not await _work(graph, deps)  # not due yet
 
@@ -385,11 +452,47 @@ async def test_resume_continues_after_action_in_flight(
                 .where(Action.id == action_id)
                 .values(status="succeeded", provider_ref="sent-by-other-caller")
             )
-            await s.execute(update(Job).where(Job.id == job.id).values(scheduled_at=func.now()))
+        await _make_due(sessionmaker, job.id)
         assert await _work(graph, deps)
 
     (job,) = await _jobs(sessionmaker, "resume_workflow")
-    assert (job.state, job.attempts) == ("done", 2)
+    assert (job.state, job.attempts) == ("done", 1)
+    assert (await _run(sessionmaker)).status == "done_with_actions"
+    assert await _count(sessionmaker, Action) == 1
+    assert await _count(sessionmaker, MockOutbox) == 0  # nothing sent twice
+
+
+async def test_in_flight_reschedules_do_not_exhaust_attempts(
+    sessionmaker: Session,
+    make_deps: DepsBuilder,
+    worker_settings: Any,
+    owner: Owner,
+    mail: MockMailProvider,
+) -> None:
+    owner_id = owner.id
+    url = worker_settings.checkpoint_database_url
+    await _pause_for_approval(sessionmaker, make_deps, url)
+    action_id = await _action_in_flight(sessionmaker, owner_id, mail)
+    (job,) = await _jobs(sessionmaker, "resume_workflow")
+
+    async with open_graph(url) as graph:
+        deps = make_deps(AFTER_APPROVAL)
+        for _ in range(MAX_JOB_ATTEMPTS + 1):  # the other caller is still sending each time
+            assert await _work(graph, deps)
+            (job,) = await _jobs(sessionmaker, "resume_workflow")
+            assert (job.state, job.attempts, job.error) == ("queued", 0, None)
+            await _make_due(sessionmaker, job.id)
+
+        async with sessionmaker() as s, s.begin():  # the other caller's send succeeded
+            await s.execute(
+                update(Action)
+                .where(Action.id == action_id)
+                .values(status="succeeded", provider_ref="sent-by-other-caller")
+            )
+        assert await _work(graph, deps)
+
+    (job,) = await _jobs(sessionmaker, "resume_workflow")
+    assert (job.state, job.attempts, job.error) == ("done", 1, None)
     assert (await _run(sessionmaker)).status == "done_with_actions"
     assert await _count(sessionmaker, Action) == 1
     assert await _count(sessionmaker, MockOutbox) == 0  # nothing sent twice
@@ -708,31 +811,15 @@ async def test_claim_fails_job_after_max_attempts(
     await _pause_for_approval(sessionmaker, make_deps, worker_settings.checkpoint_database_url)
     await _approve(sessionmaker, owner_id, mail)
     (resume,) = await _jobs(sessionmaker, "resume_workflow")
+    await _exhaust(sessionmaker, resume.id)
     async with sessionmaker() as s, s.begin():
-        # The job has crashed its worker MAX_JOB_ATTEMPTS times; its last lease has expired.
-        await s.execute(
-            update(Job)
-            .where(Job.id == resume.id)
-            .values(
-                state="running",
-                attempts=MAX_JOB_ATTEMPTS,
-                lease_owner="w-dead",
-                lease_until=func.now() - LEASE,
-            )
-        )
         other = await enqueue(s, "start_workflow", "other-job", {"n": 1})
 
-    async with sessionmaker() as s, s.begin():
-        claimed = await claim(s, "w2", LEASE, on_exhausted=fail_exhausted_run)
+    claimed = await _claim_exhausting(sessionmaker)
 
     assert claimed is not None and claimed.id == other.id  # skipped to the next job
     async with sessionmaker() as s:
         job = await s.get_one(Job, resume.id)
-        (payload,) = (
-            await s.execute(
-                select(WorkflowEvent.payload).where(WorkflowEvent.event_type == "run_failed")
-            )
-        ).scalars()
     assert (job.state, job.error, job.lease_owner, job.attempts) == (
         "failed",
         "max_attempts",
@@ -741,7 +828,103 @@ async def test_claim_fails_job_after_max_attempts(
     )
     run = await _run(sessionmaker)
     assert (run.status, run.error_code) == ("failed", "internal_error")
-    assert payload == {"status": "failed", "error_code": "internal_error"}
+    assert await _run_failed_payloads(sessionmaker) == [
+        {"status": "failed", "error_code": "internal_error"}
+    ]
+
+
+async def test_exhausted_start_job_finds_run_by_thread_id(
+    sessionmaker: Session, make_deps: DepsBuilder, worker_settings: Any
+) -> None:
+    await _pause_for_approval(sessionmaker, make_deps, worker_settings.checkpoint_database_url)
+    (start,) = await _jobs(sessionmaker, "start_workflow")
+    assert "workflow_id" not in start.payload  # found through graph_thread_id instead
+    await _exhaust(sessionmaker, start.id)
+
+    assert await _claim_exhausting(sessionmaker) is None
+
+    run = await _run(sessionmaker)
+    assert (run.status, run.error_code) == ("failed", "internal_error")
+    assert await _run_failed_payloads(sessionmaker) == [
+        {"status": "failed", "error_code": "internal_error"}
+    ]
+
+
+async def test_exhausted_job_leaves_final_run_alone(
+    sessionmaker: Session, make_deps: DepsBuilder, worker_settings: Any
+) -> None:
+    await _pause_for_approval(sessionmaker, make_deps, worker_settings.checkpoint_database_url)
+    async with sessionmaker() as s, s.begin():
+        await s.execute(update(WorkflowRun).values(status="done_no_action", error_code=None))
+    (start,) = await _jobs(sessionmaker, "start_workflow")
+    await _exhaust(sessionmaker, start.id)
+
+    assert await _claim_exhausting(sessionmaker) is None
+
+    async with sessionmaker() as s:
+        assert (await s.get_one(Job, start.id)).state == "failed"
+    run = await _run(sessionmaker)
+    assert (run.status, run.error_code) == ("done_no_action", None)
+    assert await _run_failed_payloads(sessionmaker) == []
+
+
+@pytest.mark.parametrize("status", ["executing", "outcome_unknown"])
+async def test_exhausted_run_with_unresolved_action_is_outcome_unknown(
+    sessionmaker: Session,
+    make_deps: DepsBuilder,
+    worker_settings: Any,
+    owner: Owner,
+    mail: MockMailProvider,
+    status: str,
+) -> None:
+    """The send may have happened: the owner must check, so not a plain internal error."""
+    owner_id = owner.id
+    await _pause_for_approval(sessionmaker, make_deps, worker_settings.checkpoint_database_url)
+    await _action_in_flight(sessionmaker, owner_id, mail, status)
+    (resume,) = await _jobs(sessionmaker, "resume_workflow")
+    await _exhaust(sessionmaker, resume.id)
+
+    assert await _claim_exhausting(sessionmaker) is None
+
+    run = await _run(sessionmaker)
+    assert (run.status, run.error_code) == ("failed", "outcome_unknown")
+    assert await _run_failed_payloads(sessionmaker) == [
+        {"status": "failed", "error_code": "outcome_unknown"}
+    ]
+
+
+@pytest.mark.parametrize("failure", ["malformed_workflow_id", "db_error"])
+async def test_failing_exhausted_hook_does_not_wedge_claims(
+    sessionmaker: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    if failure == "db_error":
+
+        async def broken_outcome(session: AsyncSession, *args: Any) -> None:
+            await session.execute(text("SELECT 1 / 0"))  # aborts the statement's savepoint
+
+        monkeypatch.setattr(worker, "_set_run_outcome", broken_outcome)
+        workflow_id = str(uuid.uuid4())
+    else:
+        workflow_id = "not-a-uuid"
+    async with sessionmaker() as s, s.begin():
+        broken = await enqueue(s, "resume_workflow", "broken", {"workflow_id": workflow_id})
+        other = await enqueue(s, "start_workflow", "other-job", {"n": 1})
+    await _exhaust(sessionmaker, broken.id)
+
+    claimed = await _claim_exhausting(sessionmaker)
+
+    assert claimed is not None and claimed.id == other.id
+    async with sessionmaker() as s:
+        job = await s.get_one(Job, broken.id)
+    assert (job.state, job.error, job.lease_owner) == ("failed", "max_attempts", None)
+    assert any(
+        r.levelname == "ERROR" and "could not fail the run" in r.getMessage()
+        for r in caplog.records
+    )
+    assert await _claim_exhausting(sessionmaker) is None  # the broken job stays failed
 
 
 class HangOnPlan:
