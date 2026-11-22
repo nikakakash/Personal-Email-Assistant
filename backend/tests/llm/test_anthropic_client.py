@@ -324,3 +324,17 @@ async def test_empty_text_raises_without_repair(
     with pytest.raises(LLMMalformedOutput, match="no text"):
         await make_client().structured(a_call())
     assert route.call_count == 1
+
+
+@pytest.mark.parametrize("status", [400, 503])
+async def test_provider_error_is_not_chained(
+    status: int,
+    make_client: Callable[..., AnthropicLLMClient],
+    api: respx.MockRouter,
+) -> None:
+    body = {"type": "error", "error": {"type": "x", "message": "Email body here"}}
+    api.post(URL).respond(status, json=body)
+    with pytest.raises(LLMError) as info:
+        await make_client().structured(a_call())
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__ is True

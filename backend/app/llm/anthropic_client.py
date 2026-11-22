@@ -166,10 +166,10 @@ class AnthropicLLMClient:
                 await self._close_unknown(reservation)
             else:
                 await self._close_rejected(reservation, model)
-            raise self._map_error(exc) from exc
+            raise self._map_error(exc) from None
         except anthropic.APIError as exc:  # timeout, connection, other: may have been billed
             await self._close_unknown(reservation)
-            raise self._map_error(exc) from exc
+            raise self._map_error(exc) from None
         except BaseException:  # includes CancelledError
             await self._close_unknown(reservation)
             raise
