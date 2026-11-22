@@ -1,15 +1,18 @@
 """ActionExecutor: ledger claim, at-most-once sends, timeout reconciliation, preconditions."""
 
+import asyncio
 import re
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.actions.decisions import DecisionIn, decide_proposal
 from app.actions.executor import (
+    IN_FLIGHT_GRACE,
     ActionExecutor,
     ExecutionRefused,
     calendar_event_id,
@@ -164,6 +167,14 @@ async def test_failed_definite_is_stored_and_not_retried(
     faults.send = "fail"
     first = await executor.execute(approval_id)
     assert first.status == "failed_definite"
+    # The mock's error text ("mock send failure") is replaced by a fixed code everywhere.
+    assert first.error == "provider_failed"
+    action = await _action(session)
+    assert action.error == "provider_failed"
+    assert action.result is not None and "mock" not in str(action.result)
+    audit = (await session.execute(select(AuditEvent.detail))).scalars().all()
+    events = (await session.execute(select(WorkflowEvent.payload))).scalars().all()
+    assert "mock" not in str(audit) and "mock" not in str(events)
     faults.send = "ok"
     calls = _count_calls(monkeypatch, mail, "send_reply")
     assert await executor.execute(approval_id) == first
@@ -344,3 +355,124 @@ async def test_executor_refuses_unapproved_revision(
         await executor.execute(uuid.uuid4())
     assert exc_info.value.reason == "approval_not_found"
     assert await _count(session, Action) == 0
+
+
+def _crash_record_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the first `_record` raise, as if the process died after the provider call."""
+    original = ActionExecutor._record
+    crashed: list[bool] = []
+
+    async def flaky(self: ActionExecutor, *args: Any, **kwargs: Any) -> Any:
+        if not crashed:
+            crashed.append(True)
+            raise RuntimeError("process died before recording the result")
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ActionExecutor, "_record", flaky)
+
+
+async def _age_action(session: AsyncSession, by: timedelta) -> None:
+    await session.execute(update(Action).values(updated_at=func.now() - by))
+    await session.commit()
+
+
+async def test_crash_after_provider_accept_before_record_reconciles(
+    session: AsyncSession,
+    owner_id: uuid.UUID,
+    seed: SeedFactory,
+    mail: MockMailProvider,
+    executor: ActionExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = await seed()
+    approval_id = await _decide(session, owner_id, s, mail)
+    calls = _count_calls(monkeypatch, mail, "send_reply")
+    _crash_record_once(monkeypatch)
+    with pytest.raises(RuntimeError):
+        await executor.execute(approval_id)
+    assert calls == [1]
+    assert await _count(session, MockOutbox) == 1
+    assert (await _action(session)).status == "executing"
+
+    await _age_action(session, IN_FLIGHT_GRACE + timedelta(seconds=30))
+    out = await executor.execute(approval_id)
+    assert out.status == "succeeded"
+    assert calls == [1]  # reconciled through find_sent, never sent again
+    assert await _count(session, MockOutbox) == 1
+    action = await _action(session)
+    assert action.status == "succeeded" and action.attempts == 1
+    proposal = await session.get_one(Proposal, s.proposal_id, populate_existing=True)
+    assert proposal.status == "executed"
+
+
+async def test_in_flight_row_within_grace_is_left_alone(
+    session: AsyncSession,
+    owner_id: uuid.UUID,
+    seed: SeedFactory,
+    mail: MockMailProvider,
+    executor: ActionExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = await seed()
+    approval_id = await _decide(session, owner_id, s, mail)
+    _crash_record_once(monkeypatch)
+    with pytest.raises(RuntimeError):
+        await executor.execute(approval_id)
+
+    sends = _count_calls(monkeypatch, mail, "send_reply")
+    lookups = _count_calls(monkeypatch, mail, "find_sent")
+    out = await executor.execute(approval_id)
+    assert out.status == "executing"
+    assert sends == [] and lookups == []
+    assert await _count(session, WorkflowEvent) == 1  # only approval_required, no action_result
+    assert await _count(session, AuditEvent) == 1  # only decision_recorded
+    assert (await _action(session)).status == "executing"
+
+    await _age_action(session, IN_FLIGHT_GRACE + timedelta(seconds=30))
+    assert (await executor.execute(approval_id)).status == "succeeded"
+    assert sends == [] and lookups == [1]
+
+
+async def test_concurrent_execute_sends_once(
+    session: AsyncSession,
+    owner_id: uuid.UUID,
+    seed: SeedFactory,
+    mail: MockMailProvider,
+    executor: ActionExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = await seed()
+    approval_id = await _decide(session, owner_id, s, mail)
+    calls = _count_calls(monkeypatch, mail, "send_reply")
+    results = await asyncio.gather(executor.execute(approval_id), executor.execute(approval_id))
+    assert calls == [1]
+    assert await _count(session, MockOutbox) == 1
+    assert "succeeded" in {r.status for r in results}
+    assert {r.status for r in results} <= {"succeeded", "executing"}
+    action = await _action(session)
+    assert action.status == "succeeded" and action.attempts == 1
+
+
+async def test_execute_edit_approved_revision(
+    session: AsyncSession,
+    owner_id: uuid.UUID,
+    seed: SeedFactory,
+    mail: MockMailProvider,
+    executor: ActionExecutor,
+) -> None:
+    s = await seed()
+    body = DecisionIn(
+        decision="edit_approve",
+        proposal_revision=s.revision,
+        payload_hash=s.payload_hash,
+        interrupt_id=s.interrupt_id,
+        request_id="req-edit",
+        edited_payload={"body_text": "Edited: Wednesday instead — ünïcode ok?"},
+    )
+    decided = await decide_proposal(session, owner_id, s.proposal_id, body, mail=mail)
+    out = await executor.execute(decided.approval_id)
+    assert out.status == "succeeded"  # no payload_hash_mismatch after the JSONB round trip
+    outbox = (await session.execute(select(MockOutbox))).scalar_one()
+    assert outbox.operation_id == operation_id_for(s.proposal_id, 2)
+    assert outbox.operation_id.endswith("-2")
+    assert outbox.payload["body_text"] == "Edited: Wednesday instead — ünïcode ok?"

@@ -7,7 +7,12 @@ the call runs with no transaction open, and the result is recorded in a new tran
 - a repeat `execute` of a finished operation returns the stored result;
 - a repeat of an `executing` or `outcome_unknown` operation only reconciles (looks the write up
   by operation id or event id) and never writes again; an ambiguous send stays
-  `outcome_unknown` for the owner to inspect (spec §9, §15).
+  `outcome_unknown` for the owner to inspect (spec §9, §15);
+- an `executing` row younger than `IN_FLIGHT_GRACE` is assumed to be another caller's call in
+  progress and is left alone (status `executing` is returned, nothing is recorded).
+
+Errors stored in `actions.error`, audit events and workflow events are fixed codes
+(`ErrorCode`), never provider text.
 
 The request sent is built from the approved revision's stored payload; nothing is regenerated.
 """
@@ -16,11 +21,11 @@ import base64
 import hashlib
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -46,7 +51,16 @@ from app.providers.interfaces import (
 )
 
 ActionStatus = Literal["executing", "succeeded", "failed_definite", "outcome_unknown"]
+ErrorCode = Literal[
+    "provider_failed",
+    "provider_timeout",
+    "event_id_conflict",
+    "not_found_on_reconcile",
+    "unexpected_error",
+]
 _TERMINAL = ("succeeded", "failed_definite")
+# An `executing` row this fresh is probably another caller's provider call still in progress.
+IN_FLIGHT_GRACE = timedelta(minutes=2)
 _REPLY_FIELDS = ("provider_thread_id", "in_reply_to", "references", "to", "cc", "subject")
 _EVENT_FIELDS = (
     "calendar_id",
@@ -72,7 +86,7 @@ class ExecutionRefused(Exception):  # noqa: N818 - name fixed by the contract
 class ActionOutcome:
     status: ActionStatus
     provider_ref: str | None
-    error: str | None
+    error: ErrorCode | None
 
 
 def operation_id_for(proposal_id: uuid.UUID, revision: int) -> str:
@@ -119,8 +133,9 @@ class _Claim:
     operation_id: str
     status: str
     provider_ref: str | None
-    error: str | None
+    error: ErrorCode | None
     new: bool
+    in_flight: bool
     request: OutgoingReply | EventRequest
 
 
@@ -143,7 +158,7 @@ class ActionExecutor:
         Raises `ExecutionRefused` when a precondition fails, before any ledger row exists.
         """
         claim = await self._claim(approval_id)
-        if claim.status in _TERMINAL:
+        if claim.status in _TERMINAL or claim.in_flight:
             return ActionOutcome(cast(ActionStatus, claim.status), claim.provider_ref, claim.error)
         if claim.new:
             outcome = await self._call_provider(claim)
@@ -193,14 +208,16 @@ class ActionExecutor:
                         kind=proposal.kind,
                         request_fingerprint=fingerprint,
                         status="executing",
+                        attempts=1,  # the claim is committed only to make this one call
                     )
                     .on_conflict_do_nothing(index_elements=[Action.operation_id])
                     .returning(Action.id)
                 )
             ).scalar_one_or_none()
-            action = (
-                await session.execute(select(Action).where(Action.operation_id == op))
-            ).scalar_one()
+            action, now = (
+                await session.execute(select(Action, func.now()).where(Action.operation_id == op))
+            ).one()
+            new = new_id is not None
             return _Claim(
                 action_id=action.id,
                 workflow_id=proposal.workflow_id,
@@ -209,8 +226,13 @@ class ActionExecutor:
                 operation_id=op,
                 status=action.status,
                 provider_ref=action.provider_ref,
-                error=action.error,
-                new=new_id is not None,
+                error=cast(ErrorCode | None, action.error),
+                new=new,
+                in_flight=(
+                    not new
+                    and action.status == "executing"
+                    and now - action.updated_at < IN_FLIGHT_GRACE
+                ),
                 request=request,
             )
 
@@ -220,20 +242,20 @@ class ActionExecutor:
             try:
                 result = await self._mail.send_reply(claim.request, claim.operation_id)
             except ProviderTimeout:
-                return ActionOutcome("outcome_unknown", None, "timeout")
-            except Exception as exc:  # the provider may have accepted it; never assume not
-                return ActionOutcome(
-                    "outcome_unknown", None, f"provider_error:{type(exc).__name__}"
-                )
+                return ActionOutcome("outcome_unknown", None, "provider_timeout")
+            except Exception:  # the provider may have accepted it; never assume not
+                return ActionOutcome("outcome_unknown", None, "unexpected_error")
             return _from_result(result)
 
         event_id = calendar_event_id(claim.operation_id)
         try:
             result = await self._calendar.create_event(claim.request, event_id)
         except ProviderTimeout:
-            return await self._lookup_event(claim.request, event_id, unknown_error="timeout")
-        except Exception as exc:
-            return ActionOutcome("outcome_unknown", None, f"provider_error:{type(exc).__name__}")
+            return await self._lookup_event(
+                claim.request, event_id, unknown_error="provider_timeout"
+            )
+        except Exception:
+            return ActionOutcome("outcome_unknown", None, "unexpected_error")
         return _from_result(result)
 
     async def _reconcile(self, claim: _Claim) -> ActionOutcome:
@@ -250,7 +272,7 @@ class ActionExecutor:
         )
 
     async def _lookup_event(
-        self, intended: EventRequest, event_id: str, *, unknown_error: str
+        self, intended: EventRequest, event_id: str, *, unknown_error: ErrorCode
     ) -> ActionOutcome:
         found = await self._calendar.get_event(event_id)
         if found is None:
@@ -262,6 +284,10 @@ class ActionExecutor:
     async def _record(
         self, claim: _Claim, outcome: ActionOutcome, attempted: bool
     ) -> ActionOutcome:
+        """Store the result (compare-and-set), audit it and emit `action_result`.
+
+        `attempted` is False for a reconcile lookup; attempts were already counted at claim time.
+        """
         async with self._sessionmaker() as session, session.begin():
             values: dict[str, Any] = {
                 "status": outcome.status,
@@ -272,10 +298,8 @@ class ActionExecutor:
                     "provider_ref": outcome.provider_ref,
                     "error": outcome.error,
                 },
-                "updated_at": datetime.now(UTC),
+                "updated_at": func.now(),
             }
-            if attempted:
-                values["attempts"] = Action.attempts + 1
             # Compare-and-set: a finished row is never overwritten.
             updated = (
                 await session.execute(
@@ -287,7 +311,11 @@ class ActionExecutor:
             ).scalar_one_or_none()
             if updated is None:
                 row = await session.get_one(Action, claim.action_id)
-                return ActionOutcome(cast(ActionStatus, row.status), row.provider_ref, row.error)
+                return ActionOutcome(
+                    cast(ActionStatus, row.status),
+                    row.provider_ref,
+                    cast(ErrorCode | None, row.error),
+                )
             if outcome.status == "succeeded":
                 await session.execute(
                     update(Proposal)
@@ -322,6 +350,7 @@ class ActionExecutor:
 def _from_result(result: ProviderResult) -> ActionOutcome:
     if result.status == "confirmed":
         return ActionOutcome("succeeded", result.provider_ref, None)
+    # Provider error text is never stored or shown; only the fixed code is.
     if result.status == "failed_definite":
-        return ActionOutcome("failed_definite", result.provider_ref, result.error)
-    return ActionOutcome("outcome_unknown", result.provider_ref, result.error)
+        return ActionOutcome("failed_definite", result.provider_ref, "provider_failed")
+    return ActionOutcome("outcome_unknown", result.provider_ref, "unexpected_error")

@@ -1,5 +1,6 @@
 """create_proposal: immutable revision 1, pending review item, event, idempotency."""
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,3 +66,19 @@ async def test_create_proposal_is_idempotent_per_key(
     assert await _count(session, ProposalRevision) == 1
     assert await _count(session, ReviewItem) == 1
     assert await _count(session, WorkflowEvent) == 1
+
+
+async def test_create_proposal_key_reuse_with_other_kind_raises(
+    session: AsyncSession, seed: SeedFactory
+) -> None:
+    s = await seed()
+    with pytest.raises(ValueError):
+        await create_proposal(
+            session,
+            s.run_id,
+            "create_event",
+            s.payload,
+            source_version=None,
+            preference_version=None,
+            idempotency_key=f"{s.run_id}:1",
+        )

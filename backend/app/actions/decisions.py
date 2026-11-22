@@ -100,7 +100,8 @@ class DecisionIn(BaseModel):
 class DecisionOutcome(BaseModel):
     status: Literal["accepted"]
     approval_id: uuid.UUID
-    job_id: uuid.UUID
+    # None only if the resume job row has since been removed; the decision itself stands.
+    job_id: uuid.UUID | None
     revision: int
 
 
@@ -155,31 +156,82 @@ async def _stored_outcome(
     revision = await session.get_one(ProposalRevision, approval.proposal_revision_id)
     if revision.proposal_id != proposal_id:
         raise DecisionConflict("request_id_reused")
-    job = (
-        await session.execute(select(Job).where(Job.dedup_key == f"resume:{approval.interrupt_id}"))
-    ).scalar_one()
+    job_id = (
+        await session.execute(
+            select(Job.id).where(Job.dedup_key == f"resume:{approval.interrupt_id}")
+        )
+    ).scalar_one_or_none()
     return DecisionOutcome(
-        status="accepted", approval_id=approval.id, job_id=job.id, revision=revision.revision
+        status="accepted", approval_id=approval.id, job_id=job_id, revision=revision.revision
     )
+
+
+async def _load_targets(
+    session: AsyncSession, proposal_id: uuid.UUID, *, lock: bool
+) -> tuple[ReviewItem, Proposal, ProposalRevision]:
+    """The proposal's review item, the proposal and its active revision.
+
+    With `lock`, the review item and then the proposal are locked FOR UPDATE (the same order
+    ingestion uses when it marks proposals stale). Raises ProposalNotFound.
+    """
+    stmt = (
+        select(ReviewItem)
+        .where(ReviewItem.proposal_id == proposal_id, ReviewItem.kind == "proposal")
+        .order_by(ReviewItem.created_at.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
+    item = (await session.execute(stmt.with_for_update() if lock else stmt)).scalar_one_or_none()
+    proposal = await session.get(
+        Proposal, proposal_id, with_for_update=lock, populate_existing=True
+    )
+    if item is None or proposal is None:
+        raise ProposalNotFound(str(proposal_id))
+    reviewed = (
+        await session.execute(
+            select(ProposalRevision).where(
+                ProposalRevision.proposal_id == proposal_id,
+                ProposalRevision.revision == proposal.active_revision,
+            )
+        )
+    ).scalar_one()
+    return item, proposal, reviewed
+
+
+def _check_decidable(
+    item: ReviewItem, proposal: Proposal, reviewed: ProposalRevision, body: DecisionIn
+) -> None:
+    """The decision must target the pending item, the active revision, its hash and interrupt."""
+    if item.status != "pending":
+        raise DecisionConflict("not_pending")
+    if proposal.status != "awaiting_approval":
+        raise DecisionConflict("not_awaiting_approval")
+    if proposal.active_revision != body.proposal_revision:
+        raise DecisionConflict("stale_revision")
+    if reviewed.payload_hash != body.payload_hash:
+        raise DecisionConflict("hash_mismatch")
+    if item.interrupt_id is None or item.interrupt_id != body.interrupt_id:
+        raise DecisionConflict("wrong_interrupt")
 
 
 async def _prepare_edit(
     session: AsyncSession, proposal_id: uuid.UUID, body: DecisionIn, mail: MailProvider
 ) -> dict[str, Any]:
-    """Build and validate the edited payload. Runs before any row lock; ends its read txn
-    before the provider call so no transaction is open across it."""
-    row = (
-        await session.execute(
-            select(Proposal.kind, ProposalRevision.payload, WorkflowRun.provider_thread_id)
-            .join(ProposalRevision, ProposalRevision.proposal_id == Proposal.id)
-            .join(WorkflowRun, WorkflowRun.id == Proposal.workflow_id)
-            .where(Proposal.id == proposal_id, ProposalRevision.revision == body.proposal_revision)
-        )
-    ).one_or_none()
+    """Build and validate the edited payload, before any row lock.
+
+    The staleness checks run first (unlocked; they are repeated under the lock), so a stale
+    edit is a 409, not a 422. The read transaction ends before the provider call, so none is
+    open across it.
+    """
+    item, proposal, reviewed = await _load_targets(session, proposal_id, lock=False)
+    _check_decidable(item, proposal, reviewed, body)
+    kind, base = proposal.kind, dict(reviewed.payload)
+    provider_thread_id = await session.scalar(
+        select(WorkflowRun.provider_thread_id).where(WorkflowRun.id == proposal.workflow_id)
+    )
     await session.rollback()
-    if row is None:
-        raise DecisionConflict("stale_revision")
-    kind, base, provider_thread_id = cast(tuple[str, dict[str, Any], str], tuple(row))
+    if provider_thread_id is None:
+        raise ProposalNotFound(str(proposal_id))
     merged = merge_edit(kind, base, body.edited_payload or {})
     try:
         thread: ThreadSnapshot = await mail.get_thread(provider_thread_id)
@@ -272,44 +324,12 @@ async def _decide_locked(
     body: DecisionIn,
     edited: dict[str, Any] | None,
 ) -> DecisionOutcome:
-    # Lock order: review item, then proposal (same as ingestion's stale-marking).
-    item = (
-        await session.execute(
-            select(ReviewItem)
-            .where(ReviewItem.proposal_id == proposal_id, ReviewItem.kind == "proposal")
-            .order_by(ReviewItem.created_at.desc())
-            .limit(1)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one_or_none()
-    proposal = await session.get(
-        Proposal, proposal_id, with_for_update=True, populate_existing=True
-    )
-    if item is None or proposal is None:
-        raise ProposalNotFound(str(proposal_id))
+    item, proposal, reviewed = await _load_targets(session, proposal_id, lock=True)
     # A duplicate click that waited on our lock sees the first click's committed outcome.
     stored = await _stored_outcome(session, proposal_id, body.request_id)
     if stored is not None:
         return stored
-    if item.status != "pending":
-        raise DecisionConflict("not_pending")
-    if proposal.status != "awaiting_approval":
-        raise DecisionConflict("not_awaiting_approval")
-    if proposal.active_revision != body.proposal_revision:
-        raise DecisionConflict("stale_revision")
-    reviewed = (
-        await session.execute(
-            select(ProposalRevision).where(
-                ProposalRevision.proposal_id == proposal_id,
-                ProposalRevision.revision == proposal.active_revision,
-            )
-        )
-    ).scalar_one()
-    if reviewed.payload_hash != body.payload_hash:
-        raise DecisionConflict("hash_mismatch")
-    if item.interrupt_id is None or item.interrupt_id != body.interrupt_id:
-        raise DecisionConflict("wrong_interrupt")
+    _check_decidable(item, proposal, reviewed, body)
 
     decided = reviewed
     if edited is not None:

@@ -45,7 +45,8 @@ async def create_proposal(
     """Create the proposal, revision 1, a pending review item and an `approval_required` event.
 
     Idempotent per `idempotency_key` (the graph passes `f"{workflow_id}:{step_count}"`): a
-    re-run returns the existing proposal and its active revision and writes nothing. The hash
+    re-run returns the existing proposal and its active revision and writes nothing; a key hit
+    with a different `workflow_id` or `kind` raises ValueError. The hash
     covers the payload only. Flushes; does not commit.
     """
     proposal_id = (
@@ -62,6 +63,10 @@ async def create_proposal(
                 select(Proposal).where(Proposal.idempotency_key == idempotency_key)
             )
         ).scalar_one()
+        if existing.workflow_id != workflow_id or existing.kind != kind:
+            raise ValueError(
+                f"idempotency key {idempotency_key!r} already used by another workflow or kind"
+            )
         return existing, await active_revision(session, existing)
 
     proposal = await session.get_one(Proposal, proposal_id)

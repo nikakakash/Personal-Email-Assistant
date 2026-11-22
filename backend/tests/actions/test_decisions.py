@@ -6,11 +6,17 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.actions import decisions
-from app.actions.decisions import DecisionConflict, DecisionIn, InvalidEdit, decide_proposal
+from app.actions.decisions import (
+    DecisionConflict,
+    DecisionIn,
+    InvalidEdit,
+    ProposalNotFound,
+    decide_proposal,
+)
 from app.db.models import (
     Approval,
     AuditEvent,
@@ -318,3 +324,60 @@ async def test_concurrent_approvals_one_wins(
         rows = (await check.execute(select(Approval))).scalars().all()
         assert [r.decision for r in rows] == ["approve"]
         assert await _count(check, Job) == 1
+
+
+async def test_same_request_id_concurrent_returns_same_outcome(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    owner_id: uuid.UUID,
+    seed: SeedFactory,
+    mail: MockMailProvider,
+) -> None:
+    s = await seed()
+
+    async def approve() -> decisions.DecisionOutcome:
+        async with sessionmaker() as own:
+            return await decide_proposal(
+                own, owner_id, s.proposal_id, _body(s, request_id="same"), mail=mail
+            )
+
+    first, second = await asyncio.gather(approve(), approve())
+    assert first == second
+    async with sessionmaker() as check:
+        assert await _count(check, Approval) == 1
+        assert await _count(check, Job) == 1
+
+
+async def test_stale_edit_is_conflict_not_invalid_edit(
+    session: AsyncSession, owner_id: uuid.UUID, seed: SeedFactory, mail: MockMailProvider
+) -> None:
+    s = await seed()
+    # Both stale and invalid: staleness is checked first, so the owner gets a 409.
+    stale = _body(
+        s, "edit_approve", payload_hash="0" * 64, edited_payload={"subject": "not editable"}
+    )
+    assert await _conflict(session, owner_id, s, stale, mail) == "hash_mismatch"
+    wrong_rev = _body(s, "edit_approve", proposal_revision=5, edited_payload={"body_text": " "})
+    assert await _conflict(session, owner_id, s, wrong_rev, mail) == "stale_revision"
+
+
+async def test_edit_on_missing_proposal_is_not_found(
+    session: AsyncSession, owner_id: uuid.UUID, seed: SeedFactory, mail: MockMailProvider
+) -> None:
+    s = await seed()
+    body = _body(s, "edit_approve", edited_payload={"body_text": "x"})
+    with pytest.raises(ProposalNotFound):
+        await decide_proposal(session, owner_id, uuid.uuid4(), body, mail=mail)
+    with pytest.raises(ProposalNotFound):
+        await decide_proposal(session, owner_id, uuid.uuid4(), _body(s), mail=mail)
+
+
+async def test_stored_outcome_tolerates_missing_job(
+    session: AsyncSession, owner_id: uuid.UUID, seed: SeedFactory, mail: MockMailProvider
+) -> None:
+    s = await seed()
+    first = await decide_proposal(session, owner_id, s.proposal_id, _body(s), mail=mail)
+    await session.execute(delete(Job))
+    await session.commit()
+    again = await decide_proposal(session, owner_id, s.proposal_id, _body(s), mail=mail)
+    assert again.approval_id == first.approval_id
+    assert again.job_id is None
