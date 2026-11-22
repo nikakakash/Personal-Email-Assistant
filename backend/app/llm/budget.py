@@ -60,6 +60,14 @@ class BudgetGuard:
             await session.flush()
             return row.id
 
+    async def settle_estimate(self, reservation_id: UUID) -> None:
+        """Close a reservation keeping its estimated cost (outcome unknown: fail closed)."""
+        async with self._sessionmaker() as session, session.begin():
+            row = await session.get(LlmUsage, reservation_id)
+            if row is None:
+                raise LookupError(f"unknown reservation {reservation_id}")
+            row.status = "settled"
+
     async def settle(self, reservation_id: UUID, usage: Usage, model: str) -> None:
         async with self._sessionmaker() as session, session.begin():
             row = await session.get(LlmUsage, reservation_id)

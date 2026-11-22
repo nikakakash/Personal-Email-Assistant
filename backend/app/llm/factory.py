@@ -6,6 +6,7 @@ from app.config import Settings
 from app.llm.anthropic_client import AnthropicLLMClient, build_anthropic
 from app.llm.budget import BudgetGuard
 from app.llm.client import LLMClient
+from app.llm.pricing import PRICES
 from app.llm.scripted import ScriptedLLMClient
 
 
@@ -14,5 +15,8 @@ def make_llm_client(
 ) -> LLMClient:
     if settings.llm_provider == "scripted":
         return ScriptedLLMClient({})
+    for name in ("model_triage", "model_plan", "model_draft"):
+        if getattr(settings, name) not in PRICES:
+            raise ValueError(f"{name.upper()} is not a priced model: {getattr(settings, name)!r}")
     budget = BudgetGuard(sessionmaker, settings.daily_budget_usd)
     return AnthropicLLMClient(build_anthropic(settings), settings, budget)

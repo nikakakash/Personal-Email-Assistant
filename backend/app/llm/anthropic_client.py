@@ -8,13 +8,18 @@ reply or token usage. We need the raw text for the repair turn, the refusal chec
 parsing, and real usage to settle the budget, so we validate ourselves. The wire request is
 identical to what `parse` would send.
 
-Failure handling: refusal is checked first; one repair call on invalid output; every attempt
-reserves and settles its own budget row. Prompt content is never logged or stored.
+Failure handling: refusal is checked first, then truncation (no repair), then empty text (no
+repair); one repair call on invalid output; every attempt reserves and settles its own budget
+row, priced at the model that actually served the reply. When the outcome is unknown (timeout,
+connection error, 429, 5xx, cancellation) the reservation settles at its estimate; only a 4xx
+rejection settles at zero. Prompt content is never logged or stored.
 """
 
+import asyncio
 import logging
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 import anthropic
 from anthropic import AsyncAnthropic
@@ -33,7 +38,7 @@ from app.llm.client import (
     T,
     Usage,
 )
-from app.llm.pricing import PRICES, cost_of
+from app.llm.pricing import cost_of, price_for
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +73,7 @@ class AnthropicLLMClient:
     @staticmethod
     def _estimate(call: LLMCall[T], model: str) -> Decimal:
         est_in = (len(call.system) + len(call.cached_context) + len(call.user_content)) // 4
-        price = PRICES[model]
+        price = price_for(model)
         total = (est_in * price.input + call.max_tokens * price.output) / _MILLION
         return total.quantize(_QUANTUM)
 
@@ -79,17 +84,22 @@ class AnthropicLLMClient:
         total_cost = Decimal("0")
         for _ in range(2):
             resp, usage = await self._attempt(call, model, effort, messages)
+            served = str(resp.model)  # the model that actually answered (may be a fallback)
             total = Usage(
                 total.input_tokens + usage.input_tokens,
                 total.output_tokens + usage.output_tokens,
                 total.cache_read_tokens + usage.cache_read_tokens,
                 total.cache_write_tokens + usage.cache_write_tokens,
             )
-            total_cost += cost_of(model, usage)
+            total_cost += cost_of(served, usage)
             if resp.stop_reason == "refusal":
                 category = resp.stop_details.category if resp.stop_details else None
                 raise LLMRefusal(category)
+            if resp.stop_reason in ("max_tokens", "model_context_window_exceeded"):
+                raise LLMMalformedOutput(f"reply truncated (stop_reason={resp.stop_reason})")
             raw_text = "".join(b.text for b in resp.content if b.type == "text")
+            if not raw_text.strip():
+                raise LLMMalformedOutput("model reply contained no text")
             try:
                 output = call.output_model.model_validate_json(raw_text)
             except ValidationError as exc:
@@ -106,15 +116,26 @@ class AnthropicLLMClient:
                     },
                 ]
                 continue
-            return LLMResult(output=output, usage=total, model=model, cost_usd=total_cost)
+            return LLMResult(output=output, usage=total, model=served, cost_usd=total_cost)
         raise LLMMalformedOutput(f"model output did not match {call.output_model.__name__}")
+
+    async def _close_unknown(self, reservation: UUID) -> None:
+        """Outcome unknown: keep the estimate. Shielded so cancellation cannot skip it."""
+        try:
+            await asyncio.shield(self._budget.settle_estimate(reservation))
+        except Exception:
+            logger.warning("could not settle reservation %s; it stays reserved", reservation)
+
+    async def _close_rejected(self, reservation: UUID, model: str) -> None:
+        """Request rejected before billing (4xx): release the reservation at zero."""
+        try:
+            await asyncio.shield(self._budget.settle(reservation, Usage(), model))
+        except Exception:
+            logger.warning("could not settle reservation %s; it stays reserved", reservation)
 
     async def _attempt(
         self, call: LLMCall[T], model: str, effort: str, messages: list[dict[str, Any]]
     ) -> tuple[Any, Usage]:
-        reservation = await self._budget.reserve(
-            call.purpose, model, self._estimate(call, model), call.workflow_id
-        )
         # Plain dicts: the SDK's TypedDicts do not accept `effort` as a bare str.
         output_config: Any = {
             "effort": effort,
@@ -127,6 +148,9 @@ class AnthropicLLMClient:
             {"type": "text", "text": call.system},
             {"type": "text", "text": call.cached_context, "cache_control": {"type": "ephemeral"}},
         ]
+        reservation = await self._budget.reserve(
+            call.purpose, model, self._estimate(call, model), call.workflow_id
+        )
         try:
             resp = await self._client.beta.messages.create(
                 model=model,
@@ -137,11 +161,17 @@ class AnthropicLLMClient:
                 system=system,
                 messages=messages,  # type: ignore[arg-type]
             )
-        except anthropic.APIError as exc:
-            await self._budget.settle(reservation, Usage(), model)
-            raise self._map_error(exc) from None
-        except BaseException:
-            await self._budget.settle(reservation, Usage(), model)
+        except anthropic.APIStatusError as exc:
+            if exc.status_code == 429 or exc.status_code >= 500:
+                await self._close_unknown(reservation)
+            else:
+                await self._close_rejected(reservation, model)
+            raise self._map_error(exc) from exc
+        except anthropic.APIError as exc:  # timeout, connection, other: may have been billed
+            await self._close_unknown(reservation)
+            raise self._map_error(exc) from exc
+        except BaseException:  # includes CancelledError
+            await self._close_unknown(reservation)
             raise
         u = resp.usage
         usage = Usage(
@@ -150,7 +180,7 @@ class AnthropicLLMClient:
             cache_read_tokens=u.cache_read_input_tokens or 0,
             cache_write_tokens=u.cache_creation_input_tokens or 0,
         )
-        await self._budget.settle(reservation, usage, model)
+        await self._budget.settle(reservation, usage, str(resp.model))
         return resp, usage
 
     @staticmethod

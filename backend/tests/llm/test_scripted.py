@@ -63,3 +63,14 @@ def test_factory_selects_provider(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     real = make_llm_client(Settings(_env_file=None), sessionmaker)  # type: ignore[call-arg]
     assert isinstance(real, AnthropicLLMClient)
+
+
+def test_factory_rejects_unpriced_model(
+    base_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("MODEL_PLAN", "claude-unpriced-1")
+    with pytest.raises(ValueError, match="MODEL_PLAN"):
+        make_llm_client(Settings(_env_file=None), sessionmaker)  # type: ignore[call-arg]

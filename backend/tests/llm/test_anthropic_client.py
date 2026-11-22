@@ -1,9 +1,11 @@
 """Tests for AnthropicLLMClient against a respx-mocked Messages API."""
 
+import asyncio
 import json
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -37,12 +39,14 @@ class Verdict(BaseModel):
     score: int
 
 
-def message(text: str, *, stop_reason: str = "end_turn", **usage: Any) -> dict[str, Any]:
+def message(
+    text: str, *, stop_reason: str = "end_turn", model: str = MODEL, **usage: Any
+) -> dict[str, Any]:
     return {
         "id": "msg_1",
         "type": "message",
         "role": "assistant",
-        "model": MODEL,
+        "model": model,
         "content": [{"type": "text", "text": text}] if text else [],
         "stop_reason": stop_reason,
         "stop_sequence": None,
@@ -187,8 +191,11 @@ async def test_usage_settled_with_actual_tokens(
     assert rows[0].purpose == "triage"
 
 
+ESTIMATE = Decimal("0.160048")  # (50 chars // 4) * $4/MTok + 8000 * $20/MTok
+
+
 @pytest.mark.parametrize("status", [429, 500, 503])
-async def test_transient_status_maps_and_settles_zero(
+async def test_transient_status_maps_and_settles_at_estimate(
     status: int,
     make_client: Callable[..., AnthropicLLMClient],
     api: respx.MockRouter,
@@ -198,21 +205,54 @@ async def test_transient_status_maps_and_settles_zero(
     with pytest.raises(LLMTransientError):
         await make_client().structured(a_call())
     row = (await session.execute(select(LlmUsage))).scalar_one()
-    assert (row.status, row.cost_usd) == ("settled", Decimal("0"))
+    assert (row.status, row.cost_usd) == ("settled", ESTIMATE)
 
 
-async def test_connection_error_is_transient(
+async def test_connection_error_is_transient_and_keeps_estimate(
     make_client: Callable[..., AnthropicLLMClient],
     api: respx.MockRouter,
+    session: AsyncSession,
 ) -> None:
-    api.post(URL).mock(side_effect=httpx.ConnectError("boom"))
+    route = api.post(URL).mock(side_effect=httpx.ConnectError("boom"))
     with pytest.raises(LLMTransientError):
         await make_client().structured(a_call())
+    assert route.called
+    row = (await session.execute(select(LlmUsage))).scalar_one()
+    assert (row.status, row.cost_usd) == ("settled", ESTIMATE)
 
 
-async def test_client_error_is_not_transient_and_redacted(
+async def test_timeout_keeps_estimate(
     make_client: Callable[..., AnthropicLLMClient],
     api: respx.MockRouter,
+    session: AsyncSession,
+) -> None:
+    route = api.post(URL).mock(side_effect=httpx.ConnectTimeout("slow"))
+    with pytest.raises(LLMTransientError):
+        await make_client().structured(a_call())
+    assert route.called
+    row = (await session.execute(select(LlmUsage))).scalar_one()
+    assert (row.status, row.cost_usd) == ("settled", ESTIMATE)
+
+
+async def test_cancellation_keeps_estimate(
+    make_client: Callable[..., AnthropicLLMClient],
+    monkeypatch: pytest.MonkeyPatch,
+    session: AsyncSession,
+) -> None:
+    client = make_client()
+    monkeypatch.setattr(
+        client._client.beta.messages, "create", AsyncMock(side_effect=asyncio.CancelledError())
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await client.structured(a_call())
+    row = (await session.execute(select(LlmUsage))).scalar_one()
+    assert (row.status, row.cost_usd) == ("settled", ESTIMATE)
+
+
+async def test_client_error_is_not_transient_redacted_and_settles_zero(
+    make_client: Callable[..., AnthropicLLMClient],
+    api: respx.MockRouter,
+    session: AsyncSession,
 ) -> None:
     body = {
         "type": "error",
@@ -223,3 +263,64 @@ async def test_client_error_is_not_transient_and_redacted(
         await make_client().structured(a_call())
     assert not isinstance(info.value, LLMTransientError)
     assert "Email body here" not in str(info.value)
+    row = (await session.execute(select(LlmUsage))).scalar_one()
+    assert (row.status, row.cost_usd) == ("settled", Decimal("0"))
+
+
+async def test_served_fallback_model_is_priced_and_recorded(
+    make_client: Callable[..., AnthropicLLMClient],
+    api: respx.MockRouter,
+    session: AsyncSession,
+) -> None:
+    api.post(URL).respond(200, json=message(GOOD, model="claude-opus-4-8"))
+    result = await make_client().structured(a_call())
+    expected = cost_of("claude-opus-4-8", Usage(100, 20, 0, 0))
+    assert expected == Decimal("0.001000")  # 100 * 5 + 20 * 25 per MTok
+    assert (result.model, result.cost_usd) == ("claude-opus-4-8", expected)
+    row = (await session.execute(select(LlmUsage))).scalar_one()
+    assert (row.model, row.cost_usd) == ("claude-opus-4-8", expected)
+
+
+async def test_unknown_served_model_charged_at_highest_rate(
+    make_client: Callable[..., AnthropicLLMClient],
+    api: respx.MockRouter,
+    session: AsyncSession,
+) -> None:
+    api.post(URL).respond(
+        200,
+        json=message(
+            GOOD,
+            model="claude-mystery-9",
+            input_tokens=1000,
+            output_tokens=1000,
+            cache_read_input_tokens=1000,
+            cache_creation_input_tokens=1000,
+        ),
+    )
+    result = await make_client().structured(a_call())
+    # highest per-kind rates: 5 + 25 + 0.50 + 6.25 per MTok, 1000 tokens each
+    assert result.cost_usd == Decimal("0.036750")
+    row = (await session.execute(select(LlmUsage))).scalar_one()
+    assert (row.model, row.cost_usd) == ("claude-mystery-9", Decimal("0.036750"))
+
+
+@pytest.mark.parametrize("stop_reason", ["max_tokens", "model_context_window_exceeded"])
+async def test_truncation_raises_without_repair(
+    stop_reason: str,
+    make_client: Callable[..., AnthropicLLMClient],
+    api: respx.MockRouter,
+) -> None:
+    route = api.post(URL).respond(200, json=message(BAD, stop_reason=stop_reason))
+    with pytest.raises(LLMMalformedOutput, match="truncated"):
+        await make_client().structured(a_call())
+    assert route.call_count == 1
+
+
+async def test_empty_text_raises_without_repair(
+    make_client: Callable[..., AnthropicLLMClient],
+    api: respx.MockRouter,
+) -> None:
+    route = api.post(URL).respond(200, json=message(""))
+    with pytest.raises(LLMMalformedOutput, match="no text"):
+        await make_client().structured(a_call())
+    assert route.call_count == 1
