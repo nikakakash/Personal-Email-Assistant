@@ -13,8 +13,9 @@ this order:
 A provider error or a timeout (`PREFLIGHT_TIMEOUT_SECONDS`) → `blocked:preflight_unavailable`;
 any other exception is a bug and propagates. A blocked result also sets `error_code` (and
 `status` where the run should read as paused or failed), so `finish` and `finalize` can report
-it. An ok result stores the DB-verified `approval_id` and `proposal_revision` in state; later
-nodes use those, never the ids in the owner's resume value. The checks live in
+it. Once the approval check passes (whatever the context checks then say), the DB-verified
+`approval_id` and `proposal_revision` are stored in state; later nodes use those, never the
+ids in the owner's resume value. The checks live in
 `verify_approval`, which `execute_action` calls again right before executing.
 
 `route_after_preflight` (a conditional-edge router, pure function of state) sends `ok` to
@@ -121,8 +122,12 @@ class _Approved:
     payload: dict[str, Any]
     created_at: datetime
 
+    def ids(self) -> dict[str, Any]:
+        """The verified ids as a state update, for every node downstream of the check."""
+        return {"approval_id": str(self.approval_id), "proposal_revision": self.revision}
+
     def ok(self) -> dict[str, Any]:
-        return {**_ok(), "approval_id": str(self.approval_id), "proposal_revision": self.revision}
+        return {**_ok(), **self.ids()}
 
 
 async def _outbound_blocked(deps: GraphDeps) -> bool:
@@ -206,7 +211,9 @@ async def verify_approval(state: EmailState, deps: GraphDeps, approval_id: Any) 
     """All preflight checks (reads only); returns the state update.
 
     `preflight` (result and reason), plus the DB-verified `approval_id` and
-    `proposal_revision` when ok, or `error_code` / `status` when blocked. Only provider
+    `proposal_revision` whenever the approval check passed (also when the context then turns
+    out stale or unverifiable, so `mark_stale` and `execute_action` still have them), and
+    `error_code` / `status` when blocked. Only provider
     failures (timeouts, unknown thread) become `preflight_unavailable`; any other exception is
     a bug and propagates.
     """
@@ -215,7 +222,8 @@ async def verify_approval(state: EmailState, deps: GraphDeps, approval_id: Any) 
     approved = await _check_approval(state, deps, approval_id)
     if isinstance(approved, str):
         return _blocked(approved)
-    return await _check_context(state, deps, approved) or approved.ok()
+    problem = await _check_context(state, deps, approved)
+    return {**approved.ids(), **problem} if problem is not None else approved.ok()
 
 
 async def preflight(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
@@ -234,33 +242,44 @@ def route_after_preflight(state: EmailState) -> Literal["execute_action", "mark_
     return "finish"
 
 
-def _has_action(proposal_id: uuid.UUID) -> Any:
-    """SQL `EXISTS`: some revision of this proposal has an action-ledger row."""
-    return exists(
-        select(Action.id)
-        .join(Approval, Action.approval_id == Approval.id)
-        .join(ProposalRevision, Approval.proposal_revision_id == ProposalRevision.id)
-        .where(ProposalRevision.proposal_id == proposal_id)
-    )
+def _has_action(operation_id: str) -> Any:
+    """SQL `EXISTS`: the operation has an action-ledger row (claimed, sent or finished)."""
+    return exists(select(Action.id).where(Action.operation_id == operation_id))
+
+
+async def _active_operation(deps: GraphDeps, proposal_id: uuid.UUID) -> str | None:
+    """The ledger key of the proposal's active revision (the key `execute_action` checks)."""
+    async with deps.sessionmaker() as session:
+        proposal = await session.get(Proposal, proposal_id)
+    return None if proposal is None else operation_id_for(proposal.id, proposal.active_revision)
+
+
+async def _ledger_row_exists(deps: GraphDeps, operation_id: str) -> bool:
+    async with deps.sessionmaker() as session:
+        return bool(await session.scalar(select(_has_action(operation_id))))
 
 
 async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
     """Retire the stale proposal and tell the planner why (a `stale:<n>` finding).
 
-    A proposal that already has an action-ledger row (claimed or sent) is not stale: nothing
-    is retired, no finding is added, and the run goes back to `execute_action`, whose executor
-    returns the stored result or reconciles. Otherwise both updates are compare-and-set (also
-    guarded by `NOT EXISTS` on the ledger, against a race), so a re-run changes nothing. If
+    A proposal whose active revision already has an action-ledger row (claimed or sent) is not
+    stale: nothing is retired and no finding is added. The approval is verified again (the id
+    from state, else the owner's decision) and, if valid, its verified ids go into state and
+    the run goes back to `execute_action`, whose executor returns the stored result or
+    reconciles; an invalid approval ends the run blocked, as in preflight. The ledger key is
+    the same `operation_id_for(proposal, active revision)` that `execute_action` checks, so
+    the two nodes cannot disagree and loop. Otherwise both updates are compare-and-set (also
+    guarded by `NOT EXISTS` on that ledger key, against a race), so a re-run changes nothing. If
     the thread changed, the fresh snapshot is loaded first, with no transaction open; if that
     read fails the run ends `blocked:preflight_unavailable` (the proposal is still retired).
     """
     deps = runtime.context
     proposal_id = _uuid(state.get("proposal_id"))
-    if proposal_id is not None:
-        async with deps.sessionmaker() as session:
-            claimed = bool(await session.scalar(select(_has_action(proposal_id))))
-        if claimed:
-            return {"preflight": {"result": "ok", "reason": "action_exists"}}
+    op = await _active_operation(deps, proposal_id) if proposal_id is not None else None
+    if op is not None and await _ledger_row_exists(deps, op):
+        approval_id = state.get("approval_id") or (state.get("review") or {}).get("approval_id")
+        approved = await _check_approval(state, deps, approval_id)
+        return _blocked(approved) if isinstance(approved, str) else approved.ok()
     reason = str((state.get("preflight") or {}).get("reason"))
     update_: dict[str, Any] = {}
     if reason == "thread_changed":
@@ -274,14 +293,14 @@ async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str
             update_ = _blocked("preflight_unavailable")
 
     item_id = _uuid(state.get("review_item_id"))
-    if proposal_id is not None:
+    if proposal_id is not None and op is not None:
         async with deps.sessionmaker() as session, session.begin():
             await session.execute(
                 update(Proposal)
                 .where(
                     Proposal.id == proposal_id,
                     Proposal.status == "approved",
-                    ~_has_action(proposal_id),
+                    ~_has_action(op),
                 )
                 .values(status="stale")
             )
@@ -291,7 +310,7 @@ async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str
                     .where(
                         ReviewItem.id == item_id,
                         ReviewItem.status != "stale",
-                        ~_has_action(proposal_id),
+                        ~_has_action(op),
                     )
                     .values(status="stale")
                 )
@@ -317,13 +336,6 @@ def route_after_mark_stale(
     return "finish" if result == "blocked" else "plan_next_step"
 
 
-async def _ledger_row_exists(deps: GraphDeps, approved: _Approved) -> bool:
-    op = operation_id_for(approved.proposal_id, approved.revision)
-    async with deps.sessionmaker() as session:
-        found = await session.scalar(select(Action.id).where(Action.operation_id == op))
-    return found is not None
-
-
 async def execute_action(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
     """Execute the approved revision through the action ledger (ledger first on a retry).
 
@@ -335,12 +347,14 @@ async def execute_action(state: EmailState, runtime: Runtime[GraphDeps]) -> dict
     approved = await _check_approval(state, deps, state.get("approval_id"))
     if isinstance(approved, str):
         return _blocked(approved)
-    if not await _ledger_row_exists(deps, approved):
+    if not await _ledger_row_exists(
+        deps, operation_id_for(approved.proposal_id, approved.revision)
+    ):
         if await _outbound_blocked(deps):
             return _blocked("outbound_disabled")
         problem = await _check_context(state, deps, approved)
         if problem is not None:
-            return problem
+            return {**approved.ids(), **problem}
     recheck = approved.ok()
 
     executor = ActionExecutor(deps.sessionmaker, deps.mail, deps.calendar, deps.settings)

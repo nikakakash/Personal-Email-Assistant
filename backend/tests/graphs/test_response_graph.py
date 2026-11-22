@@ -12,7 +12,7 @@ from langgraph.types import Command
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.actions.executor import IN_FLIGHT_GRACE, operation_id_for
+from app.actions.executor import IN_FLIGHT_GRACE, build_reply, operation_id_for
 from app.db.models import (
     Action,
     AppFlags,
@@ -32,8 +32,6 @@ from app.graphs.nodes.ask import question_item_id
 from app.graphs.nodes.execute import (
     PROPOSAL_TTL,
     ActionInFlight,
-    mark_stale,
-    route_after_mark_stale,
 )
 from app.graphs.nodes.proposal import persist_proposal
 from app.llm.client import BudgetExceeded, LLMCall, LLMResult, T
@@ -713,42 +711,77 @@ async def test_retry_with_outbound_paused_still_records_the_send(
     assert llm.purposes == expected_llm
 
 
-async def test_mark_stale_leaves_a_claimed_action_to_the_executor(
+@pytest.mark.parametrize("row_status", ["executing", "succeeded"])
+async def test_stale_preflight_with_claimed_action_goes_to_the_executor(
     graph: Graph,
     make_deps: DepsFactory,
     seeded: SeededRun,
     sessionmaker: Session,
     owner: Owner,
     mail: MockMailProvider,
+    row_status: str,
 ) -> None:
-    """If an action row exists, `mark_stale` retires nothing and routes back to execution."""
-    deps = make_deps(_reply_script(seeded.provider_message_id))
+    """Another caller claims (or completes) the send, then the thread changes, then we resume.
+
+    preflight → stale → `mark_stale` sees the ledger row for the active operation, keeps the
+    verified approval and routes to `execute_action`; nothing is marked stale.
+    """
+    llm = CountingLLM(ScriptedLLMClient(_reply_script(seeded.provider_message_id)))
+    deps = make_deps(llm=llm)
     paused = await run_graph(graph, seeded.input, seeded, deps)
     inner = await subgraph_values(graph, seeded)
     approve = await decide(sessionmaker, owner, paused, mail)
-    async with sessionmaker() as s:  # a claim that raced with preflight
+    proposal_id = uuid.UUID(inner["proposal_id"])
+    op = operation_id_for(proposal_id, 1)
+    values: dict[str, Any] = {"status": "executing"}
+    if row_status == "succeeded":  # the other caller's send went through and was recorded
+        async with sessionmaker() as s:
+            revision = await s.scalar(
+                select(ProposalRevision).where(ProposalRevision.proposal_id == proposal_id)
+            )
+        assert revision is not None
+        sent = await mail.send_reply(build_reply(revision.payload), op)
+        values = {"status": "succeeded", "provider_ref": sent.provider_ref}
+    async with sessionmaker() as s:
         s.add(
             Action(
-                operation_id=operation_id_for(uuid.UUID(inner["proposal_id"]), 1),
+                operation_id=op,
                 approval_id=uuid.UUID(approve["approval_id"]),
                 kind="send_reply",
-                request_fingerprint="raced",
-                status="executing",
+                request_fingerprint="other-caller",
                 attempts=1,
+                updated_at=datetime.now(UTC),
+                **values,
             )
         )
+        if row_status == "succeeded":
+            await s.execute(update(Proposal).values(status="executed"))
         await s.commit()
-    state = {**inner, "preflight": {"result": "stale", "reason": "thread_changed"}}
+    await _add_followup(sessionmaker, seeded)  # preflight will see a changed thread
 
-    update_ = await mark_stale(state, Runtime(context=deps))  # type: ignore[arg-type]
+    if row_status == "executing":
+        with pytest.raises(ActionInFlight):
+            await resume(graph, approve, seeded, deps)
+        (proposal,) = await _proposals(sessionmaker)
+        assert proposal.status == "approved"
+        async with sessionmaker() as s:
+            item = await s.get_one(ReviewItem, uuid.UUID(inner["review_item_id"]))
+        assert item.status != "stale"
+        findings = (await subgraph_values(graph, seeded))["read_findings"]
+        assert not [f for f in findings if f["kind"] == "stale"]
+        assert await count(sessionmaker, MockOutbox) == 0
+        return
 
-    assert "read_findings" not in update_
-    assert route_after_mark_stale({**state, **update_}) == "execute_action"  # type: ignore[typeddict-item]
+    done = await resume(graph, approve, seeded, deps)
+
+    assert [r["status"] for r in done["action_results"]] == ["succeeded"]
+    assert not [f for f in done["read_findings"] if f["kind"] == "stale"]
     (proposal,) = await _proposals(sessionmaker)
-    assert proposal.status == "approved"
-    async with sessionmaker() as s:
-        item = await s.get_one(ReviewItem, uuid.UUID(inner["review_item_id"]))
-    assert item.status == "resolved"
+    assert proposal.status == "executed"
+    assert llm.purposes == ["triage", "plan", "plan", "draft_reply", "plan"]
+    assert await count(sessionmaker, MockOutbox) == 1
+    assert await count(sessionmaker, Action) == 1
+    assert (await run_row(sessionmaker, seeded)).status == "done_with_actions"
 
 
 async def test_mark_stale_thread_reread_failure_blocks(

@@ -202,7 +202,9 @@ class ActionExecutor:
             if existing is None:
                 if not self._settings.outbound_execution_enabled:
                     raise ExecutionRefused("outbound_disabled")
-                flags = await session.get(AppFlags, 1)
+                # FOR SHARE: a concurrent pause (UPDATE app_flags) waits for this claim's
+                # transaction, so once the pause commits no new claim can slip past it.
+                flags = await session.get(AppFlags, 1, with_for_update={"read": True})
                 if flags is not None and flags.outbound_paused:
                     raise ExecutionRefused("outbound_paused")
             new_id = (
