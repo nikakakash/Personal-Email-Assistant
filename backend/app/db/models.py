@@ -308,9 +308,7 @@ class LlmUsage(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     cache_read_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    cost_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default="0"
-    )
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, server_default="0")
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="reserved")
     created_at: Mapped[datetime] = _ts()
 

@@ -8,9 +8,38 @@ import nh3
 MAX_BODY_CHARS = 20_000
 
 _BLOCK_TAGS = {
-    "p", "br", "div", "li", "ul", "ol", "tr", "td", "th", "table", "h1", "h2", "h3",
-    "h4", "h5", "h6", "blockquote", "pre", "hr", "section", "article", "header",
-    "footer", "aside", "nav", "dl", "dt", "dd", "figure", "figcaption", "caption", "main",
+    "p",
+    "br",
+    "div",
+    "li",
+    "ul",
+    "ol",
+    "tr",
+    "td",
+    "th",
+    "table",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "blockquote",
+    "pre",
+    "hr",
+    "section",
+    "article",
+    "header",
+    "footer",
+    "aside",
+    "nav",
+    "dl",
+    "dt",
+    "dd",
+    "figure",
+    "figcaption",
+    "caption",
+    "main",
 }
 # After the first nh3 pass the only tags left are attribute-free block tags.
 _BLOCK_TAG = re.compile(r"</?[a-z0-9]+\s*/?>", re.IGNORECASE)
@@ -43,9 +72,7 @@ def sanitize_html(html_body: str) -> str:
     nh3 also removes scripts, ``on*`` event attributes and ``javascript:`` URLs by default.
     """
     tags = set(nh3.ALLOWED_TAGS) - {"img"}
-    attributes = {
-        tag: set(attrs) - {"style"} for tag, attrs in nh3.ALLOWED_ATTRIBUTES.items()
-    }
+    attributes = {tag: set(attrs) - {"style"} for tag, attrs in nh3.ALLOWED_ATTRIBUTES.items()}
     return nh3.clean(
         html_body,
         tags=tags,

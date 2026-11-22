@@ -178,9 +178,7 @@ def upgrade() -> None:
         _ts("created_at"),
         _ts("resolved_at", nullable=True, default=False),
         _check("kind", ("notification", "question", "proposal"), "ck_review_items_kind"),
-        _check(
-            "status", ("pending", "resolved", "stale", "cancelled"), "ck_review_items_status"
-        ),
+        _check("status", ("pending", "resolved", "stale", "cancelled"), "ck_review_items_status"),
     )
     op.create_index("ix_review_items_status_created_at", "review_items", ["status", "created_at"])
 

@@ -16,9 +16,7 @@ WorkflowFactory = Callable[[], Awaitable[WorkflowRun]]
 async def test_migration_creates_tables(session: AsyncSession) -> None:
     names = set(
         (
-            await session.execute(
-                text("select tablename from pg_tables where schemaname='public'")
-            )
+            await session.execute(text("select tablename from pg_tables where schemaname='public'"))
         ).scalars()
     )
     assert {t.name for t in Base.metadata.sorted_tables} <= names
