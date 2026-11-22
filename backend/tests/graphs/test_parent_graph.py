@@ -69,6 +69,7 @@ async def test_ignore_route_finishes_no_action(
         "node_started:load_context",
         "node_started:load_preferences",
         "node_started:triage",
+        "node_started:record_triage",
         "node_started:finalize",
         "run_completed",
     ]

@@ -28,7 +28,7 @@ def notification_item_id(workflow_id: str) -> uuid.UUID:
 async def persist_notification(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
     """Store the notification as a pending review item."""
     item_id = notification_item_id(state["workflow_id"])
-    await persist_review_item(
+    opened = await persist_review_item(
         runtime.context,
         state["workflow_id"],
         item_id,
@@ -40,7 +40,15 @@ async def persist_notification(state: EmailState, runtime: Runtime[GraphDeps]) -
             "evidence_refs": state.get("evidence_refs") or [],
         },
     )
+    if not opened:
+        return {"run_final": True}  # cancelled meanwhile: no item, no interrupt
     return {"review_item_id": str(item_id)}
+
+
+def route_after_persist_notification(
+    state: EmailState,
+) -> Literal["notification_interrupt", "finalize"]:
+    return "finalize" if state.get("run_final") else "notification_interrupt"
 
 
 def notification_interrupt(state: EmailState) -> dict[str, Any]:

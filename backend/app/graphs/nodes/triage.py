@@ -9,9 +9,9 @@ a refusal, output that stays malformed after the adapter's repair attempt, or
 `BudgetExceeded` pauses the run. `LLMTransientError` is not caught: it propagates out of the
 graph so the worker can retry later (the checkpoint before this node is kept).
 
-The outcome (classification and reason) is also written to `workflow_runs` in a short
-transaction of its own after the model call, so the review queue can show it. That write is
-an idempotent UPDATE: if LangGraph re-runs the node, it just writes the new values again.
+`record_triage` is a separate node after it: side effects live in their own nodes. It copies
+the classification and reason onto `workflow_runs` (an idempotent UPDATE, safe to re-run) so
+the review queue and workflow lists can show them without reading checkpoints.
 
 Conditional edge: `route_after_triage(state)` is a pure function of state that names the next
 node; `add_conditional_edges` maps its return values to nodes.
@@ -43,32 +43,8 @@ def _needs_review(reason: str) -> dict[str, Any]:
     }
 
 
-async def _record_triage(
-    deps: GraphDeps, workflow_id: str, outcome: dict[str, Any]
-) -> dict[str, Any]:
-    """Store the classification and reason on the run; return `outcome` unchanged."""
-    async with deps.sessionmaker() as session, session.begin():
-        await session.execute(
-            update(WorkflowRun)
-            .where(WorkflowRun.id == UUID(workflow_id))
-            .values(
-                classification=outcome["classification"],
-                triage_reason=outcome["decision_summary"],
-            )
-        )
-    return outcome
-
-
 async def triage(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
     """Classify the thread as ignore, notify or respond."""
-    outcome = await _classify(state, runtime)
-    if outcome.get("status") == "paused":
-        return outcome
-    return await _record_triage(runtime.context, state["workflow_id"], outcome)
-
-
-async def _classify(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
-    """The model's triage decision as a state update (or a paused / needs-review update)."""
     prompt = load_prompt("triage")
     call = LLMCall(
         purpose="triage",
@@ -89,16 +65,32 @@ async def _classify(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str,
         return _needs_review("the model's triage output was invalid.")
 
     if decision.needs_clarification:
-        update = _needs_review(decision.reason)
-        update["urgency"] = decision.urgency
-        update["evidence_refs"] = list(decision.evidence_refs)
-        return update
+        outcome = _needs_review(decision.reason)
+        outcome["urgency"] = decision.urgency
+        outcome["evidence_refs"] = list(decision.evidence_refs)
+        return outcome
     return {
         "classification": decision.classification,
         "urgency": decision.urgency,
         "decision_summary": decision.reason,
         "evidence_refs": list(decision.evidence_refs),
     }
+
+
+async def record_triage(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
+    """Store triage's classification and reason on the run (skipped when paused)."""
+    if state.get("status") == "paused" or not state.get("classification"):
+        return {}
+    async with runtime.context.sessionmaker() as session, session.begin():
+        await session.execute(
+            update(WorkflowRun)
+            .where(WorkflowRun.id == UUID(state["workflow_id"]))
+            .values(
+                classification=state.get("classification"),
+                triage_reason=state.get("decision_summary"),
+            )
+        )
+    return {}
 
 
 def route_after_triage(

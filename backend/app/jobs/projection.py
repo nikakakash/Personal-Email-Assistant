@@ -93,6 +93,13 @@ async def project_interrupts(
     Flushes but does not commit. Returns the pending interrupts.
     """
     interrupts = pending_interrupts(snap)
+    if interrupts:
+        # The run row first, then review items: the lock order `cancel_workflow` uses.
+        await session.execute(
+            update(WorkflowRun)
+            .where(WorkflowRun.id == workflow_id, WorkflowRun.status.not_in(FINAL_STATUSES))
+            .values(status="waiting_review", updated_at=datetime.now(UTC))
+        )
     for interrupt in interrupts:
         item_id = _review_item_id(interrupt)
         if item_id is None:
@@ -105,11 +112,5 @@ async def project_interrupts(
                 ReviewItem.status == "pending",
             )
             .values(interrupt_id=interrupt.id)
-        )
-    if interrupts:
-        await session.execute(
-            update(WorkflowRun)
-            .where(WorkflowRun.id == workflow_id, WorkflowRun.status.not_in(FINAL_STATUSES))
-            .values(status="waiting_review", updated_at=datetime.now(UTC))
         )
     return interrupts

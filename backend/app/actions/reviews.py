@@ -9,12 +9,16 @@ resolved, and the `resume_workflow` job is enqueued in the same transaction. The
 is stored in the item's payload as `decision_request_id`, so a repeated click with the same
 id returns the original outcome instead of a 409.
 
-Cancelling: locks the run's pending review items, then its proposals (the order ingestion
-and `decide_proposal` use), then the run. Pending items become `cancelled`; proposals not
-yet executed become `cancelled_before_execution`; a proposal with an Action row (a write
-that started or finished) is left alone and reported. The run becomes `cancelled` unless it
-is already final, a `run_cancelled` event is written, and the pending interrupt (if any) is
-resumed with `{"decision": "cancelled"}` so the graph ends cleanly.
+Cancelling: locks the run row first, then its pending review items, then its proposals.
+`create_proposal`, `persist_review_item` and the interrupt projection also lock the run before
+review items, so a graph step racing the cancel either finished first (and its new item is
+cancelled here) or sees the run already `cancelled` and creates nothing.
+
+Pending items become `cancelled`; proposals not yet executed become
+`cancelled_before_execution`; a proposal with an Action row (a write that started or
+finished) is left alone and reported. The run becomes `cancelled` unless it is already
+final, a `run_cancelled` event is written, and the pending interrupt (if any) is resumed with
+`{"decision": "cancelled"}` so the graph ends cleanly.
 """
 
 import uuid
@@ -238,8 +242,11 @@ async def _run_actions(session: AsyncSession, workflow_id: uuid.UUID) -> list[Co
 
 
 async def _cancel(session: AsyncSession, workflow_id: uuid.UUID, request_id: str) -> CancelOutcome:
-    if await session.get(WorkflowRun, workflow_id) is None:
+    run = await session.get(WorkflowRun, workflow_id, with_for_update=True, populate_existing=True)
+    if run is None:
         raise ReviewNotFound(str(workflow_id))
+    # Checked under the run lock: a concurrent duplicate waited for the first cancel to
+    # commit, so it finds the stored outcome here instead of a 409.
     stored = await _stored_cancel(session, workflow_id, request_id)
     if stored is not None:
         return stored
@@ -265,9 +272,6 @@ async def _cancel(session: AsyncSession, workflow_id: uuid.UUID, request_id: str
                 .execution_options(populate_existing=True)
             )
         ).scalars()
-    )
-    run = await session.get_one(
-        WorkflowRun, workflow_id, with_for_update=True, populate_existing=True
     )
     # Read after the proposal locks: an executor claim holds the proposal FOR SHARE while it
     # inserts its Action row, so any row it commits is visible here.

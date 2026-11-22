@@ -9,6 +9,7 @@ per namespace and stored in the validated, normalized form.
 
 import uuid
 from datetime import datetime, time
+from functools import cache
 from typing import Annotated, Any, Literal, Self
 from zoneinfo import available_timezones
 
@@ -33,6 +34,16 @@ from app.db.models import PreferenceVersion
 router = APIRouter(prefix="/api/v1/preferences", tags=["preferences"], dependencies=OWNER_ONLY)
 
 Namespace = Literal["triage", "writing", "scheduling"]
+# Postgres's default name for UniqueConstraint("owner_id", "namespace", "revision").
+_REVISION_UNIQUE = "preference_versions_owner_id_namespace_revision_key"
+
+
+@cache
+def _zones() -> frozenset[str]:
+    """The IANA zone names (scanning tzdata is slow, and the set never changes at runtime)."""
+    return frozenset(available_timezones())
+
+
 _HHMM = r"^([01]\d|2[0-3]):[0-5]\d$"
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)]
 
@@ -70,7 +81,7 @@ class SchedulingPrefs(BaseModel):
     @field_validator("time_zone")
     @classmethod
     def _iana_zone(cls, value: str) -> str:
-        if value not in available_timezones():
+        if value not in _zones():
             raise ValueError("unknown IANA time zone")
         return value
 
@@ -191,6 +202,8 @@ async def update_preference(
             await session.flush()
             await session.refresh(new)
             return _out(new)
-    except IntegrityError:
-        # Two first-time writes raced to the same (owner, namespace, revision).
+    except IntegrityError as exc:
+        # Two writes raced to the same (owner, namespace, revision); anything else is a bug.
+        if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) != _REVISION_UNIQUE:
+            raise
         raise DecisionConflict("revision_mismatch") from None

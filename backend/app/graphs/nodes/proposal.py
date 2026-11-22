@@ -6,6 +6,10 @@ review item (`create_proposal`). It is idempotent: the key `f"{workflow_id}:{ste
 returns the existing proposal if the node runs again. `step_count` only ever grows (the planner
 increments it), so each planning round gets a fresh key.
 
+If the run is already final (the owner cancelled while the graph was drafting),
+`create_proposal` raises `RunIsFinal`; the node then writes nothing and returns
+`{"run_final": True}`, and `route_after_persist_proposal` sends the graph to `finish`.
+
 `approval_interrupt` is only the `interrupt()` call. On resume LangGraph re-runs the node from
 its top, so any write placed before `interrupt()` would run twice; the approval itself is
 recorded by the API (`decide_proposal`) before the resume job exists. The resume values are the
@@ -26,8 +30,9 @@ from typing import Any, Literal, cast
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.actions.proposals import ProposalKind, create_proposal
+from app.actions.proposals import ProposalKind, RunIsFinal, create_proposal
 from app.db.models import Proposal, ReviewItem
 from app.graphs.deps import GraphDeps
 from app.graphs.state import EmailState
@@ -41,24 +46,20 @@ async def persist_proposal(state: EmailState, runtime: Runtime[GraphDeps]) -> di
     draft = state.get("draft")
     if draft is None:
         raise ValueError("persist_proposal needs a validated draft")
-    async with runtime.context.sessionmaker() as session, session.begin():
-        proposal, revision = await create_proposal(
-            session,
-            workflow_id,
-            cast(ProposalKind, state.get("draft_kind")),
-            draft,
-            state.get("source_version"),
-            str(state.get("preference_version", 0)),
-            idempotency_key=f"{state['workflow_id']}:{state.get('step_count', 0)}",
-        )
-        item_id = (
-            await session.execute(
-                select(ReviewItem.id)
-                .where(ReviewItem.proposal_id == proposal.id, ReviewItem.kind == "proposal")
-                .order_by(ReviewItem.created_at.desc())
-                .limit(1)
+    try:
+        async with runtime.context.sessionmaker() as session, session.begin():
+            proposal, revision = await create_proposal(
+                session,
+                workflow_id,
+                cast(ProposalKind, state.get("draft_kind")),
+                draft,
+                state.get("source_version"),
+                str(state.get("preference_version", 0)),
+                idempotency_key=f"{state['workflow_id']}:{state.get('step_count', 0)}",
             )
-        ).scalar_one()
+            item_id = await _review_item_id(session, proposal.id)
+    except RunIsFinal:
+        return {"run_final": True}  # cancelled while drafting: nothing to review
     return {
         "proposal_id": str(proposal.id),
         "proposal_revision": revision.revision,
@@ -66,6 +67,21 @@ async def persist_proposal(state: EmailState, runtime: Runtime[GraphDeps]) -> di
         "approval_id": None,
         "preflight": None,
     }
+
+
+def route_after_persist_proposal(state: EmailState) -> Literal["approval_interrupt", "finish"]:
+    return "finish" if state.get("run_final") else "approval_interrupt"
+
+
+async def _review_item_id(session: AsyncSession, proposal_id: uuid.UUID) -> uuid.UUID:
+    return (
+        await session.execute(
+            select(ReviewItem.id)
+            .where(ReviewItem.proposal_id == proposal_id, ReviewItem.kind == "proposal")
+            .order_by(ReviewItem.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one()
 
 
 def approval_interrupt(state: EmailState) -> dict[str, Any]:

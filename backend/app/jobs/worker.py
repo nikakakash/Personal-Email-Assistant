@@ -29,6 +29,9 @@ How a workflow survives a restart (the concepts, in order):
   its top, and this time `interrupt()` returns `value`. The graph object and the saver can be
   brand new (a new process): everything needed is in Postgres, and the runtime dependencies
   (`GraphDeps`) are passed fresh on each call, never checkpointed.
+- **Final runs.** Once a run is final (cancelled, done, failed), only a `cancelled` or
+  `superseded` resume is delivered, so the paused node ends the graph; any other resume (an
+  answer or approval queued just before a cancel) is a no-op and the job completes.
 - **Continuing after a crash.** If a worker dies mid-run, its job lease expires and another
   worker claims the job again. The checkpoint then has no pending interrupt but a non-empty
   `snap.next` (the step that was running). `ainvoke(None, config, ...)` means "continue from
@@ -255,9 +258,18 @@ async def _run_start(graph: Graph, deps: GraphDeps, target: _Target) -> None:
         log.info("start job for %s: run already finished", target.thread_id)
 
 
+# The only resumes delivered to a final (e.g. cancelled) run: they end the graph cleanly.
+ENDING_DECISIONS = ("cancelled", "superseded")
+
+
 async def _run_resume(
     graph: Graph, deps: GraphDeps, target: _Target, payload: dict[str, Any]
 ) -> None:
+    decision = (payload.get("resume") or {}).get("decision")
+    if decision not in ENDING_DECISIONS and await _is_final(deps, target.workflow_id):
+        # E.g. an answer queued just before the owner cancelled: the run must not continue.
+        log.info("resume job for %s: run is final; %r not delivered", target.thread_id, decision)
+        return
     snap = await graph.aget_state(target.config, subgraphs=True)
     matched = _matching_interrupt(snap, payload)
     if matched is not None:

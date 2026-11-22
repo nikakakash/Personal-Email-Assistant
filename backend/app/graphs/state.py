@@ -82,6 +82,9 @@ class EmailState(TypedDict, total=False):
     review_item_id: str | None
     review: dict[str, Any] | None
 
+    # Set when a persist node found the run already final (e.g. cancelled): end, don't pause.
+    run_final: bool
+
     # Outcome.
     action_results: Annotated[list[dict[str, Any]], operator.add]
     status: str

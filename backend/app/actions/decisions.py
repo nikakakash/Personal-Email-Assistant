@@ -30,6 +30,7 @@ from app.db.models import (
     ReviewItem,
     WorkflowRun,
 )
+from app.graphs.nodes.finalize import FINAL_STATUSES
 from app.graphs.nodes.validate import Kind, validate_payload
 from app.jobs.queue import enqueue
 from app.mail.addresses import normalize_address
@@ -198,10 +199,26 @@ async def _load_targets(
     return item, proposal, reviewed
 
 
+async def _run_status(session: AsyncSession, proposal: Proposal) -> str | None:
+    return await session.scalar(
+        select(WorkflowRun.status).where(WorkflowRun.id == proposal.workflow_id)
+    )
+
+
 def _check_decidable(
-    item: ReviewItem, proposal: Proposal, reviewed: ProposalRevision, body: DecisionIn
+    item: ReviewItem,
+    proposal: Proposal,
+    reviewed: ProposalRevision,
+    body: DecisionIn,
+    run_status: str | None,
 ) -> None:
-    """The decision must target the pending item, the active revision, its hash and interrupt."""
+    """The decision must target an open run's pending item, the active revision, its hash and
+    interrupt. A final run is checked first, so a cancelled run says so (not just `not_pending`).
+    """
+    if run_status == "cancelled":
+        raise DecisionConflict("run_cancelled")
+    if run_status is None or run_status in FINAL_STATUSES:
+        raise DecisionConflict("run_final")
     if item.status != "pending":
         raise DecisionConflict("not_pending")
     if proposal.status != "awaiting_approval":
@@ -224,7 +241,7 @@ async def _prepare_edit(
     open across it.
     """
     item, proposal, reviewed = await _load_targets(session, proposal_id, lock=False)
-    _check_decidable(item, proposal, reviewed, body)
+    _check_decidable(item, proposal, reviewed, body, await _run_status(session, proposal))
     kind, base = proposal.kind, dict(reviewed.payload)
     provider_thread_id = await session.scalar(
         select(WorkflowRun.provider_thread_id).where(WorkflowRun.id == proposal.workflow_id)
@@ -329,7 +346,7 @@ async def _decide_locked(
     stored = await _stored_outcome(session, proposal_id, body.request_id)
     if stored is not None:
         return stored
-    _check_decidable(item, proposal, reviewed, body)
+    _check_decidable(item, proposal, reviewed, body, await _run_status(session, proposal))
 
     decided = reviewed
     if edited is not None:

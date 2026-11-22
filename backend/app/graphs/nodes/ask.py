@@ -17,7 +17,10 @@ executes a second time. So:
 Resume values (sent by the API): `{"decision": "answer", "answer": "<text>"}`, or
 `{"decision": "superseded"}` / `{"decision": "cancelled"}`.
 
-`persist_review_item` is shared with `notify.py`.
+`persist_review_item` is shared with `notify.py`. It refuses to open an item on a run that is
+already final (e.g. the owner cancelled it while the graph was still working): the node then
+returns `{"run_final": True}` and the conditional edge after it (`route_after_persist_question`)
+goes to `finish` instead of pausing at an interrupt nobody may answer.
 """
 
 import uuid
@@ -42,12 +45,28 @@ async def persist_review_item(
     item_id: uuid.UUID,
     kind: Literal["notification", "question"],
     payload: dict[str, Any],
-) -> None:
-    """Insert a pending review item once; set the run to `waiting_review` unless it is final.
+) -> bool:
+    """Insert a pending review item once and set the run to `waiting_review`; False if final.
 
-    `approval_required` is emitted only by the call that actually inserted the row.
+    The run row is updated (and so locked) first, with the `NOT IN FINAL_STATUSES` guard: a
+    concurrent cancel either committed already (no row matches, nothing is inserted) or waits
+    for this transaction and then cancels the new item. `approval_required` is emitted only
+    by the call that actually inserted the row.
     """
     async with deps.sessionmaker() as session, session.begin():
+        open_run = (
+            await session.execute(
+                update(WorkflowRun)
+                .where(
+                    WorkflowRun.id == uuid.UUID(workflow_id),
+                    WorkflowRun.status.not_in(FINAL_STATUSES),
+                )
+                .values(status="waiting_review", updated_at=datetime.now(UTC))
+                .returning(WorkflowRun.id)
+            )
+        ).scalar_one_or_none()
+        if open_run is None:
+            return False
         inserted = (
             await session.execute(
                 insert(ReviewItem)
@@ -62,14 +81,6 @@ async def persist_review_item(
                 .returning(ReviewItem.id)
             )
         ).scalar_one_or_none()
-        await session.execute(
-            update(WorkflowRun)
-            .where(
-                WorkflowRun.id == uuid.UUID(workflow_id),
-                WorkflowRun.status.not_in(FINAL_STATUSES),
-            )
-            .values(status="waiting_review", updated_at=datetime.now(UTC))
-        )
         if inserted is not None:
             await emit(
                 session,
@@ -77,6 +88,7 @@ async def persist_review_item(
                 "approval_required",
                 {"review_item_id": str(item_id), "kind": kind},
             )
+    return True
 
 
 def question_item_id(workflow_id: str, step_count: int) -> uuid.UUID:
@@ -86,14 +98,20 @@ def question_item_id(workflow_id: str, step_count: int) -> uuid.UUID:
 async def persist_question(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
     """Store the planner's question as a pending review item."""
     item_id = question_item_id(state["workflow_id"], state.get("step_count", 0))
-    await persist_review_item(
+    opened = await persist_review_item(
         runtime.context,
         state["workflow_id"],
         item_id,
         "question",
         {"question": state.get("pending_question") or ""},
     )
+    if not opened:
+        return {"run_final": True}
     return {"review_item_id": str(item_id)}
+
+
+def route_after_persist_question(state: EmailState) -> Literal["question_interrupt", "finish"]:
+    return "finish" if state.get("run_final") else "question_interrupt"
 
 
 def question_interrupt(state: EmailState) -> dict[str, Any]:

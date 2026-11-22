@@ -24,6 +24,7 @@ Flow:
 
     START → plan_next_step ─(route_after_plan)─┬→ read_tools → plan_next_step
                                                ├→ persist_question → question_interrupt
+                                               │      (persist_* → finish if the run is final)
                                                │      ─(answer)→ record_answer → plan_next_step
                                                ├→ draft_reply | draft_meeting → validate_proposal
                                                │      ─(route_after_validate)→ persist_proposal
@@ -65,6 +66,7 @@ from app.graphs.nodes.ask import (
     persist_question,
     question_interrupt,
     record_answer,
+    route_after_persist_question,
     route_after_question,
 )
 from app.graphs.nodes.draft import draft_meeting, draft_reply
@@ -82,6 +84,7 @@ from app.graphs.nodes.proposal import (
     approval_interrupt,
     persist_proposal,
     record_feedback,
+    route_after_persist_proposal,
     route_after_review,
 )
 from app.graphs.nodes.reads import read_tools
@@ -141,7 +144,9 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
     )
     g.add_edge("read_tools", "plan_next_step")
 
-    g.add_edge("persist_question", "question_interrupt")
+    g.add_conditional_edges(
+        "persist_question", route_after_persist_question, ["question_interrupt", "finish"]
+    )
     g.add_conditional_edges(
         "question_interrupt",
         route_after_question,
@@ -162,7 +167,9 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
         },
     )
 
-    g.add_edge("persist_proposal", "approval_interrupt")
+    g.add_conditional_edges(
+        "persist_proposal", route_after_persist_proposal, ["approval_interrupt", "finish"]
+    )
     g.add_conditional_edges(
         "approval_interrupt",
         route_after_review,

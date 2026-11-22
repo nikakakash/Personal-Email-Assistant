@@ -7,7 +7,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Job, Proposal
+from app.db.models import Job, Proposal, WorkflowRun
 from tests.api.conftest import SeededProposal
 
 SeedProposal = Callable[[], Awaitable[SeededProposal]]
@@ -79,3 +79,27 @@ async def test_decision_invalid_edit_422(authed: AsyncClient, seed_proposal: See
     )
     assert r.status_code == 422
     assert r.json() == {"error": "invalid_edit", "errors": ["field_not_editable:subject"]}
+
+
+async def test_decision_on_cancelled_run_409(
+    authed: AsyncClient, session: AsyncSession, seed_proposal: SeedProposal
+) -> None:
+    seeded = await seed_proposal()
+    cancel = await authed.post(
+        f"/api/v1/workflows/{seeded.workflow_id}/cancel", json={"request_id": "c-1"}
+    )
+    assert cancel.status_code == 202
+    r = await authed.post(f"/api/v1/proposals/{seeded.proposal_id}/decision", json=_body(seeded))
+    assert r.status_code == 409
+    assert r.json() == {"error": "conflict", "reason": "run_cancelled"}
+
+
+async def test_decision_on_final_run_409(
+    authed: AsyncClient, session: AsyncSession, seed_proposal: SeedProposal
+) -> None:
+    seeded = await seed_proposal()
+    run = await session.get_one(WorkflowRun, seeded.workflow_id)
+    run.status = "failed"
+    await session.commit()
+    r = await authed.post(f"/api/v1/proposals/{seeded.proposal_id}/decision", json=_body(seeded))
+    assert r.status_code == 409 and r.json()["reason"] == "run_final"

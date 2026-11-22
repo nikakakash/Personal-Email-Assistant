@@ -1,13 +1,15 @@
 """Review queue, workflow list and detail, question/notification answers and cancel."""
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.actions.reviews import CancelOutcome, ReviewOutcome, answer_question, cancel_workflow
 from app.db.models import (
     Action,
     Approval,
@@ -327,3 +329,44 @@ async def test_owner_scoped_404_for_unknown_ids(authed: AsyncClient) -> None:
         assert r.status_code == 404, url
         assert r.json() == {"error": "not_found"}
     assert (await authed.get("/api/v1/workflows/not-a-uuid")).status_code == 422
+
+
+async def test_concurrent_duplicate_cancels_return_original_outcome(
+    sessionmaker: async_sessionmaker[AsyncSession], seed_proposal: SeedProposal
+) -> None:
+    seeded = await seed_proposal()
+
+    async def cancel() -> CancelOutcome:
+        async with sessionmaker() as s:
+            return await cancel_workflow(s, seeded.workflow_id, request_id="same")
+
+    first, second = await asyncio.gather(cancel(), cancel())
+    assert first == second
+    assert first.cancelled_review_items == [seeded.review_item_id]
+    async with sessionmaker() as s:
+        events = await s.scalar(
+            select(func.count())
+            .select_from(WorkflowEvent)
+            .where(WorkflowEvent.event_type == "run_cancelled")
+        )
+    assert events == 1
+
+
+async def test_concurrent_duplicate_answers_return_original_outcome(
+    sessionmaker: async_sessionmaker[AsyncSession], seed_item: SeedItem
+) -> None:
+    item = await seed_item("question")
+    assert item.interrupt_id is not None
+    interrupt_id = item.interrupt_id
+
+    async def answer() -> ReviewOutcome:
+        async with sessionmaker() as s:
+            return await answer_question(
+                s, item.id, answer="Tuesday", request_id="same", interrupt_id=interrupt_id
+            )
+
+    first, second = await asyncio.gather(answer(), answer())
+    assert first == second
+    async with sessionmaker() as s:
+        jobs = await s.scalar(select(func.count()).select_from(Job))
+    assert jobs == 1

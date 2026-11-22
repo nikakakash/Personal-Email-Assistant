@@ -16,8 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.actions.hashing import payload_hash
 from app.db.models import Proposal, ProposalRevision, ReviewItem, WorkflowEvent, WorkflowRun
+from app.graphs.nodes.finalize import FINAL_STATUSES
 
 ProposalKind = Literal["send_reply", "create_event"]
+
+
+class RunIsFinal(Exception):  # noqa: N818 - reads as a state, like ProposalNotFound
+    """The workflow run is already final (e.g. cancelled): no new proposal may be opened."""
 
 
 async def active_revision(session: AsyncSession, proposal: Proposal) -> ProposalRevision:
@@ -48,7 +53,16 @@ async def create_proposal(
     re-run returns the existing proposal and its active revision and writes nothing; a key hit
     with a different `workflow_id` or `kind` raises ValueError. The hash
     covers the payload only. Flushes; does not commit.
+
+    Raises `RunIsFinal` (writing nothing) if the run is final. The run row is locked first,
+    the same order `cancel_workflow` locks in, so a concurrent cancel either committed before
+    (and is seen here) or waits and then cancels what this call created.
     """
+    run_status = await session.scalar(
+        select(WorkflowRun.status).where(WorkflowRun.id == workflow_id).with_for_update()
+    )
+    if run_status is None or run_status in FINAL_STATUSES:
+        raise RunIsFinal(str(workflow_id))
     proposal_id = (
         await session.execute(
             insert(Proposal)
@@ -104,7 +118,7 @@ async def create_proposal(
     )
     await session.execute(
         update(WorkflowRun)
-        .where(WorkflowRun.id == workflow_id)
+        .where(WorkflowRun.id == workflow_id, WorkflowRun.status.not_in(FINAL_STATUSES))
         .values(status="waiting_review", updated_at=datetime.now(UTC))
     )
     await session.flush()

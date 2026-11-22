@@ -1,8 +1,9 @@
 """The parent workflow graph: context, preferences, triage, notification review, response.
 
-    START → load_context → load_preferences → triage
-    triage ─(route_after_triage)─┬→ finalize                (ignore, or budget pause)
+    START → load_context → load_preferences → triage → record_triage
+    record_triage ─(route_after_triage)─┬→ finalize         (ignore, or budget pause)
                                  ├→ persist_notification    (notify, or needs review)
+                                 │    ─(run final)→ finalize
                                  │    → notification_interrupt
                                  │    ─(route_after_notification)─┬→ finalize  (dismiss)
                                  │                                └→ response  (respond)
@@ -55,8 +56,9 @@ from app.graphs.nodes.notify import (
     notification_interrupt,
     persist_notification,
     route_after_notification,
+    route_after_persist_notification,
 )
-from app.graphs.nodes.triage import route_after_triage, triage
+from app.graphs.nodes.triage import record_triage, route_after_triage, triage
 from app.graphs.response import build_response_graph
 from app.graphs.state import EmailState
 
@@ -75,6 +77,7 @@ def build_parent_graph(
         ("load_context", load_context),
         ("load_preferences", load_preferences),
         ("triage", triage),
+        ("record_triage", record_triage),
         ("persist_notification", persist_notification),
         ("unknown_decision", unknown_decision),
         ("finalize", finalize),
@@ -92,10 +95,15 @@ def build_parent_graph(
     g.add_edge(START, "load_context")
     g.add_edge("load_context", "load_preferences")
     g.add_edge("load_preferences", "triage")
+    g.add_edge("triage", "record_triage")
     g.add_conditional_edges(
-        "triage", route_after_triage, ["finalize", "persist_notification", "response"]
+        "record_triage", route_after_triage, ["finalize", "persist_notification", "response"]
     )
-    g.add_edge("persist_notification", "notification_interrupt")
+    g.add_conditional_edges(
+        "persist_notification",
+        route_after_persist_notification,
+        ["notification_interrupt", "finalize"],
+    )
     g.add_conditional_edges(
         "notification_interrupt",
         route_after_notification,

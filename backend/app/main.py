@@ -38,7 +38,15 @@ def create_app(
         finally:
             await engine.dispose()
 
-    app = FastAPI(title="Email Assistant", lifespan=lifespan)
+    production = settings.app_env == "production"
+    app = FastAPI(
+        title="Email Assistant",
+        lifespan=lifespan,
+        # No public API map in production: /docs, /redoc and /openapi.json answer 404.
+        docs_url=None if production else "/docs",
+        redoc_url=None if production else "/redoc",
+        openapi_url=None if production else "/openapi.json",
+    )
     app.state.settings = settings
     app.state.sessionmaker = sessionmaker
     app.state.faults = MockFaults()
@@ -46,6 +54,6 @@ def create_app(
     install_error_handlers(app)
     for module in (health, auth, reviews, workflows, decisions, preferences, system, events):
         app.include_router(module.router)
-    if settings.app_env != "production":
+    if not production:
         app.include_router(dev.router)
     return app

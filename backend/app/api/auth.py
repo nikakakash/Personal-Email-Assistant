@@ -2,7 +2,11 @@
 
 There is exactly one way to become the owner: know `OWNER_PASSPHRASE`. The first successful
 login creates the single `Owner` row (email = `OWNER_EMAIL`); later logins reuse it. A visitor
-without the passphrase cannot claim the app (spec §13).
+without the passphrase cannot claim the app (spec §13). Nor can one who guesses a default:
+while the passphrase or the session secret is empty, the `replace-me` placeholder or shorter
+than 12 characters, login answers 503 `not_configured` (production refuses to start at all).
+Passphrases are compared as SHA-256 digests with `hmac.compare_digest`, so neither the
+content nor the length of the real passphrase leaks through timing.
 
 Failed logins are throttled in memory: after `MAX_FAILURES` failures within `WINDOW` every
 login attempt (even a correct one) gets 429 until the oldest failure leaves the window. The
@@ -10,6 +14,7 @@ counter is global, not per client address, so rotating addresses does not help a
 cost is that a flood of bad attempts also locks the owner out for up to a minute.
 """
 
+import hashlib
 import hmac
 import secrets
 import time
@@ -34,7 +39,7 @@ from app.api.deps import (
     check_origin,
     signer,
 )
-from app.config import Settings
+from app.config import Settings, weak_secret
 from app.db.models import Owner
 
 __all__ = ["CSRF_HEADER", "LoginThrottle", "router"]
@@ -110,16 +115,22 @@ async def _ensure_owner(session: SessionDep, settings: Settings) -> Owner:
     return owner
 
 
+def _digest(value: str) -> bytes:
+    return hashlib.sha256(value.encode()).digest()
+
+
 @router.post("/login")
 async def login(
     body: LoginIn, request: Request, response: Response, session: SessionDep, settings: SettingsDep
 ) -> LoginOut:
     check_origin(request, settings)  # no CSRF token exists yet; the origin check still applies
+    passphrase = settings.owner_passphrase.get_secret_value()
+    if weak_secret(passphrase) or weak_secret(settings.session_secret.get_secret_value()):
+        raise HTTPException(status_code=503, detail="not_configured")
     throttle: LoginThrottle = request.app.state.login_throttle
     if throttle.blocked():
         raise HTTPException(status_code=429, detail="too_many_attempts")
-    expected = settings.owner_passphrase.get_secret_value().encode()
-    if not hmac.compare_digest(body.passphrase.encode(), expected):
+    if not hmac.compare_digest(_digest(body.passphrase), _digest(passphrase)):
         throttle.record_failure()
         raise HTTPException(status_code=401, detail="invalid_credentials")
     owner = await _ensure_owner(session, settings)

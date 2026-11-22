@@ -9,6 +9,15 @@ from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PLACEHOLDER = "replace-me"
+MIN_SECRET_LENGTH = 12
+
+
+def weak_secret(value: str) -> bool:
+    """Empty, the placeholder, or shorter than `MIN_SECRET_LENGTH`: unusable as a secret."""
+    stripped = value.strip()
+    return stripped == PLACEHOLDER or len(stripped) < MIN_SECRET_LENGTH
+
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _BACKEND_DIR.parent
 DEFAULT_FIXTURES_DIR = _REPO_ROOT / "evals" / "fixtures"
@@ -52,6 +61,20 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _require_owner_secrets_in_production(self) -> "Settings":
+        """In production the passphrase and session secret must be real (spec §13)."""
+        if self.app_env != "production":
+            return self
+        for name in ("owner_passphrase", "session_secret"):
+            secret: SecretStr = getattr(self, name)
+            if weak_secret(secret.get_secret_value()):
+                raise ValueError(
+                    f"{name} is empty, the placeholder or shorter than "
+                    f"{MIN_SECRET_LENGTH} characters; set a real one for production"
+                )
+        return self
 
     @model_validator(mode="after")
     def _reject_placeholder_secrets(self) -> "Settings":
