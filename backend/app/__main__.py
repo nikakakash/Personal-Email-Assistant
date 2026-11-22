@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+from pathlib import Path
 
 
 def main(argv: list[str]) -> int:
@@ -14,7 +15,16 @@ def main(argv: list[str]) -> int:
 
         uvicorn.run("app.main:create_app", factory=True, host="127.0.0.1", port=8000)
         return 0
-    if command in ("worker", "migrate"):
+    if command == "migrate":
+        from alembic import command as alembic_command
+        from alembic.config import Config
+
+        backend_dir = Path(__file__).resolve().parent.parent
+        cfg = Config(str(backend_dir / "alembic.ini"))
+        cfg.set_main_option("script_location", str(backend_dir / "migrations"))
+        alembic_command.upgrade(cfg, "head")  # checkpointer setup is added in Task 11
+        return 0
+    if command == "worker":
         print(f"{command}: not implemented yet", file=sys.stderr)
         return 1
     print("usage: python -m app {api|worker|migrate}", file=sys.stderr)
