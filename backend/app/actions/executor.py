@@ -8,6 +8,8 @@ the call runs with no transaction open, and the result is recorded in a new tran
 - a repeat of an `executing` or `outcome_unknown` operation only reconciles (looks the write up
   by operation id or event id) and never writes again; an ambiguous send stays
   `outcome_unknown` for the owner to inspect (spec §9, §15);
+- the outbound kill switch (`OUTBOUND_EXECUTION_ENABLED=false` or `app_flags.outbound_paused`)
+  refuses only a new claim: returning a stored result and reconciling are reads, always allowed;
 - an `executing` row younger than `IN_FLIGHT_GRACE` is assumed to be another caller's call in
   progress and is left alone (status `executing` is returned, nothing is recorded).
 
@@ -181,11 +183,6 @@ class ActionExecutor:
                 raise ExecutionRefused("revision_not_active")
             if proposal.status not in ("approved", "executed"):
                 raise ExecutionRefused("proposal_not_approved")
-            if not self._settings.outbound_execution_enabled:
-                raise ExecutionRefused("outbound_disabled")
-            flags = await session.get(AppFlags, 1)
-            if flags is not None and flags.outbound_paused:
-                raise ExecutionRefused("outbound_paused")
             fingerprint = payload_hash(revision.payload)
             if fingerprint != revision.payload_hash:
                 raise ExecutionRefused("payload_hash_mismatch")
@@ -199,6 +196,15 @@ class ActionExecutor:
                 raise ExecutionRefused("invalid_payload") from exc
 
             op = operation_id_for(proposal.id, revision.revision)
+            # The kill switch blocks only NEW writes. An existing row is returned or
+            # reconciled (reads) whatever the flags say, so a recorded send is never lost.
+            existing = await session.scalar(select(Action.id).where(Action.operation_id == op))
+            if existing is None:
+                if not self._settings.outbound_execution_enabled:
+                    raise ExecutionRefused("outbound_disabled")
+                flags = await session.get(AppFlags, 1)
+                if flags is not None and flags.outbound_paused:
+                    raise ExecutionRefused("outbound_paused")
             new_id = (
                 await session.execute(
                     insert(Action)

@@ -25,14 +25,15 @@ regenerated: a stale proposal needs a new draft and a new approval.
 `execute_action` may be a retry (after a crash or `ActionInFlight`) long after preflight ran,
 so it is *ledger first*:
 
-1. The approval checks always run again (outbound enabled, approval accepted, active revision;
-   an `executed` proposal is accepted, since the retry may follow a successful send).
+1. The approval checks always run again (approval accepted, active revision; an `executed`
+   proposal is accepted, since the retry may follow a successful send).
 2. If an `actions` row already exists for the operation, in any status, the send has been
-   claimed or made. The context checks are skipped: a thread that changed after the send must
-   not turn a sent reply into a "stale" proposal. The executor then returns the stored result
-   or reconciles; it never writes twice.
-3. Only when no row exists does it repeat the context checks (TTL, thread version, slot) and
-   route a failed one exactly as preflight would.
+   claimed or made. The outbound and context checks are skipped: the kill switch means "no new
+   writes", and returning a stored result or reconciling is a read; a thread that changed after
+   the send must not turn a sent reply into a "stale" proposal. The executor then returns the
+   stored result or reconciles; it never writes twice.
+3. Only when no row exists does it repeat the outbound check and the context checks (TTL,
+   thread version, slot), routing a failed one exactly as preflight would.
 
 It then hands the approval to the deterministic `ActionExecutor`, which owns the idempotent
 action ledger. Outcomes:
@@ -124,15 +125,19 @@ class _Approved:
         return {**_ok(), "approval_id": str(self.approval_id), "proposal_revision": self.revision}
 
 
-async def _check_approval(state: EmailState, deps: GraphDeps, approval_id: Any) -> _Approved | str:
-    """Outbound enabled and the approval valid for the active revision, or a blocking reason."""
+async def _outbound_blocked(deps: GraphDeps) -> bool:
+    """The kill switch: the setting is off or `app_flags.outbound_paused` is set."""
     if not deps.settings.outbound_execution_enabled:
-        return "outbound_disabled"
-    verified_id = _uuid(approval_id)
+        return True
     async with deps.sessionmaker() as session:
         flags = await session.get(AppFlags, 1)
-        if flags is not None and flags.outbound_paused:
-            return "outbound_disabled"
+    return flags is not None and flags.outbound_paused
+
+
+async def _check_approval(state: EmailState, deps: GraphDeps, approval_id: Any) -> _Approved | str:
+    """The approval is accepted and valid for the active revision, or a blocking reason."""
+    verified_id = _uuid(approval_id)
+    async with deps.sessionmaker() as session:
         approval = await session.get(Approval, verified_id) if verified_id else None
         if approval is None or approval.decision not in ACCEPTING:
             return "approval_invalid"
@@ -205,6 +210,8 @@ async def verify_approval(state: EmailState, deps: GraphDeps, approval_id: Any) 
     failures (timeouts, unknown thread) become `preflight_unavailable`; any other exception is
     a bug and propagates.
     """
+    if await _outbound_blocked(deps):
+        return _blocked("outbound_disabled")
     approved = await _check_approval(state, deps, approval_id)
     if isinstance(approved, str):
         return _blocked(approved)
@@ -240,12 +247,20 @@ def _has_action(proposal_id: uuid.UUID) -> Any:
 async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
     """Retire the stale proposal and tell the planner why (a `stale:<n>` finding).
 
-    Both updates are compare-and-set, so a re-run changes nothing, and neither touches a
-    proposal that already has an action-ledger row (claimed or sent: it is not stale). If the
-    thread changed, the fresh snapshot is loaded first, with no transaction open; if that read
-    fails the run ends `blocked:preflight_unavailable` (the proposal is still retired).
+    A proposal that already has an action-ledger row (claimed or sent) is not stale: nothing
+    is retired, no finding is added, and the run goes back to `execute_action`, whose executor
+    returns the stored result or reconciles. Otherwise both updates are compare-and-set (also
+    guarded by `NOT EXISTS` on the ledger, against a race), so a re-run changes nothing. If
+    the thread changed, the fresh snapshot is loaded first, with no transaction open; if that
+    read fails the run ends `blocked:preflight_unavailable` (the proposal is still retired).
     """
     deps = runtime.context
+    proposal_id = _uuid(state.get("proposal_id"))
+    if proposal_id is not None:
+        async with deps.sessionmaker() as session:
+            claimed = bool(await session.scalar(select(_has_action(proposal_id))))
+        if claimed:
+            return {"preflight": {"result": "ok", "reason": "action_exists"}}
     reason = str((state.get("preflight") or {}).get("reason"))
     update_: dict[str, Any] = {}
     if reason == "thread_changed":
@@ -258,7 +273,6 @@ async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str
         except _Unavailable:
             update_ = _blocked("preflight_unavailable")
 
-    proposal_id = _uuid(state.get("proposal_id"))
     item_id = _uuid(state.get("review_item_id"))
     if proposal_id is not None:
         async with deps.sessionmaker() as session, session.begin():
@@ -294,9 +308,13 @@ async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str
     return {**update_, "read_findings": [finding], "preflight": None}
 
 
-def route_after_mark_stale(state: EmailState) -> Literal["plan_next_step", "finish"]:
-    blocked = (state.get("preflight") or {}).get("result") == "blocked"
-    return "finish" if blocked else "plan_next_step"
+def route_after_mark_stale(
+    state: EmailState,
+) -> Literal["plan_next_step", "execute_action", "finish"]:
+    result = (state.get("preflight") or {}).get("result")
+    if result == "ok":  # the proposal has a ledger row: let the executor reconcile
+        return "execute_action"
+    return "finish" if result == "blocked" else "plan_next_step"
 
 
 async def _ledger_row_exists(deps: GraphDeps, approved: _Approved) -> bool:
@@ -318,6 +336,8 @@ async def execute_action(state: EmailState, runtime: Runtime[GraphDeps]) -> dict
     if isinstance(approved, str):
         return _blocked(approved)
     if not await _ledger_row_exists(deps, approved):
+        if await _outbound_blocked(deps):
+            return _blocked("outbound_disabled")
         problem = await _check_context(state, deps, approved)
         if problem is not None:
             return problem

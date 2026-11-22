@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.actions.executor import IN_FLIGHT_GRACE, operation_id_for
 from app.db.models import (
     Action,
+    AppFlags,
     Approval,
     EmailMessage,
     MockCalendarEvent,
@@ -28,7 +29,12 @@ from app.db.models import (
 from app.graphs.deps import GraphDeps
 from app.graphs.nodes import execute
 from app.graphs.nodes.ask import question_item_id
-from app.graphs.nodes.execute import PROPOSAL_TTL, ActionInFlight
+from app.graphs.nodes.execute import (
+    PROPOSAL_TTL,
+    ActionInFlight,
+    mark_stale,
+    route_after_mark_stale,
+)
 from app.graphs.nodes.proposal import persist_proposal
 from app.llm.client import BudgetExceeded, LLMCall, LLMResult, T
 from app.llm.scripted import ScriptedLLMClient
@@ -595,6 +601,7 @@ class CrashAfterSend:
     def __init__(self, inner: MockMailProvider) -> None:
         self.inner = inner
         self.crash = True
+        self.hide_sent = False  # the provider's search misses the sent message
 
     async def get_thread(self, provider_thread_id: str, limit: int = 20) -> ThreadSnapshot:
         return await self.inner.get_thread(provider_thread_id, limit)
@@ -606,6 +613,8 @@ class CrashAfterSend:
         return result
 
     async def find_sent(self, operation_id: str) -> ProviderResult | None:
+        if self.hide_sent:
+            return None
         return await self.inner.find_sent(operation_id)
 
 
@@ -647,6 +656,99 @@ async def test_retry_after_crash_post_send_with_changed_thread(
     assert proposal.status == "executed"
     assert llm.purposes == ["triage", "plan", "plan", "draft_reply", "plan"]
     assert (await run_row(sessionmaker, seeded)).status == "done_with_actions"
+
+
+@pytest.mark.parametrize(
+    ("row_status", "hide_sent", "kill_switch", "run_status", "error_code"),
+    [
+        ("succeeded", False, "flag", "done_with_actions", None),
+        ("succeeded", False, "setting", "done_with_actions", None),
+        ("outcome_unknown", False, "flag", "done_with_actions", None),
+        ("outcome_unknown", True, "flag", "failed", "outcome_unknown"),
+    ],
+)
+async def test_retry_with_outbound_paused_still_records_the_send(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: Session,
+    owner: Owner,
+    mail: MockMailProvider,
+    row_status: str,
+    hide_sent: bool,
+    kill_switch: str,
+    run_status: str,
+    error_code: str | None,
+) -> None:
+    """The kill switch blocks new sends only; a send already in the ledger is still recorded."""
+    crashing = CrashAfterSend(mail)
+    llm = CountingLLM(ScriptedLLMClient(_reply_script(seeded.provider_message_id)))
+    deps = make_deps(llm=llm, mail_provider=crashing)
+    paused = await run_graph(graph, seeded.input, seeded, deps)
+    approve = await decide(sessionmaker, owner, paused, mail)
+    with pytest.raises(WorkerCrash):  # the reply is sent, then the worker dies
+        await resume(graph, approve, seeded, deps)
+    crashing.crash, crashing.hide_sent = False, hide_sent
+    values: dict[str, Any] = {"status": row_status, "updated_at": datetime.now(UTC)}
+    if row_status == "succeeded":  # the result was recorded just before the crash
+        values["provider_ref"] = "recorded-ref"
+    async with sessionmaker() as s:
+        await s.execute(update(Action).values(**values))
+        if kill_switch == "flag":
+            s.add(AppFlags(id=1, outbound_paused=True))
+        await s.commit()
+    if kill_switch == "setting":
+        deps = make_deps(llm=llm, mail_provider=crashing, outbound=False)
+
+    done = await run_graph(graph, None, seeded, deps)
+
+    assert [r["status"] for r in done["action_results"]] == [
+        "outcome_unknown" if hide_sent else "succeeded"
+    ]
+    assert await count(sessionmaker, MockOutbox) == 1
+    assert await count(sessionmaker, Action) == 1
+    run = await run_row(sessionmaker, seeded)
+    assert (run.status, run.error_code) == (run_status, error_code)
+    expected_llm = ["triage", "plan", "plan", "draft_reply"] + ([] if hide_sent else ["plan"])
+    assert llm.purposes == expected_llm
+
+
+async def test_mark_stale_leaves_a_claimed_action_to_the_executor(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: Session,
+    owner: Owner,
+    mail: MockMailProvider,
+) -> None:
+    """If an action row exists, `mark_stale` retires nothing and routes back to execution."""
+    deps = make_deps(_reply_script(seeded.provider_message_id))
+    paused = await run_graph(graph, seeded.input, seeded, deps)
+    inner = await subgraph_values(graph, seeded)
+    approve = await decide(sessionmaker, owner, paused, mail)
+    async with sessionmaker() as s:  # a claim that raced with preflight
+        s.add(
+            Action(
+                operation_id=operation_id_for(uuid.UUID(inner["proposal_id"]), 1),
+                approval_id=uuid.UUID(approve["approval_id"]),
+                kind="send_reply",
+                request_fingerprint="raced",
+                status="executing",
+                attempts=1,
+            )
+        )
+        await s.commit()
+    state = {**inner, "preflight": {"result": "stale", "reason": "thread_changed"}}
+
+    update_ = await mark_stale(state, Runtime(context=deps))  # type: ignore[arg-type]
+
+    assert "read_findings" not in update_
+    assert route_after_mark_stale({**state, **update_}) == "execute_action"  # type: ignore[typeddict-item]
+    (proposal,) = await _proposals(sessionmaker)
+    assert proposal.status == "approved"
+    async with sessionmaker() as s:
+        item = await s.get_one(ReviewItem, uuid.UUID(inner["review_item_id"]))
+    assert item.status == "resolved"
 
 
 async def test_mark_stale_thread_reread_failure_blocks(

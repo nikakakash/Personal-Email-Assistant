@@ -320,6 +320,37 @@ async def test_executor_refuses_when_outbound_disabled(
     assert await _count(session, MockOutbox) == 0
 
 
+async def test_reconcile_and_stored_result_allowed_while_outbound_paused(
+    session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    owner_id: uuid.UUID,
+    seed: SeedFactory,
+    mail: MockMailProvider,
+    calendar: MockCalendarProvider,
+    faults: MockFaults,
+    executor: ActionExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kill switch blocks only new claims; reconcile and stored results are reads."""
+    s = await seed()
+    approval_id = await _decide(session, owner_id, s, mail)
+    faults.send = "timeout_after_accept"
+    assert (await executor.execute(approval_id)).status == "outcome_unknown"
+    session.add(AppFlags(id=1, outbound_paused=True))
+    await session.commit()
+    faults.send = "ok"
+    calls = _count_calls(monkeypatch, mail, "send_reply")
+
+    reconciled = await executor.execute(approval_id)
+
+    assert reconciled.status == "succeeded"
+    disabled = ActionExecutor(sessionmaker, mail, calendar, _settings(enabled=False))
+    assert (await disabled.execute(approval_id)).status == "succeeded"  # stored result
+    assert calls == []
+    assert await _count(session, MockOutbox) == 1
+    assert (await _action(session)).status == "succeeded"
+
+
 async def test_executor_refuses_unapproved_revision(
     session: AsyncSession,
     owner_id: uuid.UUID,
