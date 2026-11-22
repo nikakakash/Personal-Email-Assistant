@@ -6,6 +6,7 @@ with a hand-built `Runtime(context=GraphDeps(...))`. No graph is compiled in the
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -20,7 +21,7 @@ from app.graphs.deps import GraphDeps
 from app.graphs.nodes import reads
 from app.graphs.nodes.draft import draft_meeting, draft_reply
 from app.graphs.nodes.plan import plan_next_step, route_after_plan
-from app.graphs.nodes.reads import read_tools
+from app.graphs.nodes.reads import read_tools, scheduling_preferences
 from app.graphs.nodes.validate import route_after_validate, validate_payload, validate_proposal
 from app.graphs.state import EmailState, merge_by_key
 from app.llm.client import (
@@ -182,6 +183,7 @@ def _validate(kind: str, payload: dict[str, Any], state: EmailState, **kw: Any) 
         "findings": state.get("read_findings", []),
         "owner_identities": [OWNER],
         "author": "model",
+        "scheduling": scheduling_preferences(state),  # Europe/Paris, 09:00-17:00, 10 min buffer
     }
     args.update(kw)
     return validate_payload(kind, payload, **args)  # type: ignore[arg-type]
@@ -458,7 +460,9 @@ def test_tool_timeout_is_sixty_seconds() -> None:
     assert reads.TOOL_TIMEOUT_SECONDS == 60
 
 
-async def test_read_tool_provider_error_becomes_finding(settings: Settings) -> None:
+async def test_read_tool_provider_error_becomes_finding(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
     class BrokenMail:
         async def get_thread(self, provider_thread_id: str, limit: int = 20) -> ThreadSnapshot:
             raise RuntimeError("connection reset")
@@ -468,7 +472,12 @@ async def test_read_tool_provider_error_becomes_finding(settings: Settings) -> N
             raise KeyError(provider_thread_id)
 
     state = _state("replyall-planning", next_action="read_thread", step_count=2)
-    out = await read_tools(state, _runtime(settings, mail=BrokenMail()))
+    with caplog.at_level(logging.ERROR, logger="app.graphs.nodes.reads"):
+        out = await read_tools(state, _runtime(settings, mail=BrokenMail()))
+    [record] = caplog.records
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1].__cause__, RuntimeError)  # type and traceback logged
+    assert "connection reset" not in json.dumps(out["read_findings"])
     assert out["read_findings"] == [
         {
             "key": "error:read_thread:2",
@@ -739,14 +748,14 @@ async def test_validate_without_draft(settings: Settings) -> None:
 def test_evidence_ref_forms_accepted() -> None:
     state = _state(
         "injection-send-to-attacker",
-        read_findings=[AVAILABILITY],
+        read_findings=[AVAILABILITY, {"key": "thread:v2", "kind": "thread", "message_count": 1}],
         owner_inputs=[{"answer": "pay on Friday"}],
     )
     refs = [
         "message:injection-send-to-attacker-m1",
         "thread:thr-injection-send-to-attacker",
+        "thread:v2",  # the read_thread finding key
         "availability:2026-11-19:2026-11-19",
-        "availability:availability:2026-11-19:2026-11-19",
         "owner_input:0",
     ]
     assert (
@@ -755,7 +764,14 @@ def test_evidence_ref_forms_accepted() -> None:
         )
         == []
     )
-    bad = ["owner_input:1", "thread:v1", "availability:2026-11-20:2026-11-20", "bogus"]
+    bad = [
+        "owner_input:1",
+        "thread:v1",  # a version no finding reported
+        "availability:2026-11-20:2026-11-20",
+        "availability:availability:2026-11-19:2026-11-19",  # doubled prefix is not canonical
+        "error:read_thread:1",
+        "bogus",
+    ]
     errors = _validate(
         "send_reply", _good_reply(evidence_refs=bad), state, owner_inputs=state["owner_inputs"]
     )
@@ -768,6 +784,14 @@ def test_evidence_ref_forms_accepted() -> None:
         ({"evidence_refs": []}, ["missing_evidence"]),
         ({"to": [], "cc": []}, ["no_recipients"]),
         ({"to": ["not an address"]}, ["invalid_address:not an address"]),
+        (
+            {"to": ["Mallory <mallory@suspicious.example.net>"]},
+            ["non_canonical_address:Mallory <mallory@suspicious.example.net>"],
+        ),
+        (
+            {"cc": ["Mallory@Suspicious.example.net"]},
+            ["non_canonical_address:Mallory@Suspicious.example.net"],
+        ),
         ({"to": ["owner@example.com"]}, ["recipient_not_in_thread:owner@example.com"]),
         (
             {"cc": ["Bcc: x@evil.test\r\nmallory@suspicious.example.net"]},
@@ -812,7 +836,10 @@ def test_validate_body_at_limit_ok() -> None:
             ["end_not_after_start", "time_not_from_availability"],
         ),
         ({"end": "2026-11-19T09:34:00+00:00"}, ["duration_out_of_bounds"]),
-        ({"end": "2026-11-19T17:31:00+00:00"}, ["duration_out_of_bounds"]),
+        (
+            {"end": "2026-11-19T17:31:00+00:00"},
+            ["duration_out_of_bounds", "outside_working_hours"],
+        ),
         ({"calendar_id": "work"}, ["invalid_calendar"]),
         ({"title": " "}, ["empty_title"]),
         ({"title": "Sync\nBcc: x"}, ["unsafe_header:title"]),
@@ -820,6 +847,10 @@ def test_validate_body_at_limit_ok() -> None:
         ({"send_updates": "some"}, ["invalid_field:send_updates"]),
         ({"attendees": ["attacker@evil.test"]}, ["attendee_not_in_thread:attacker@evil.test"]),
         ({"attendees": ["@@"]}, ["invalid_address:@@"]),
+        (
+            {"attendees": ["Priya <priya@client.example.com>"]},
+            ["non_canonical_address:Priya <priya@client.example.com>"],
+        ),
         ({"evidence_refs": []}, ["missing_evidence"]),
         (
             {"evidence_refs": ["availability:2026-11-20:2026-11-20"]},
@@ -834,10 +865,91 @@ def test_validate_event_error_codes(over: dict[str, Any], expected: list[str]) -
 
 def test_validate_event_duration_bounds_inclusive() -> None:
     state = _state("sched-tomorrow-afternoon", read_findings=[AVAILABILITY])
-    start = datetime(2026, 11, 19, 9, 30, tzinfo=UTC)
-    for minutes in (5, 8 * 60):
-        end = (start + timedelta(minutes=minutes)).isoformat()
-        assert _validate("create_event", _good_event(end=end), state) == []
+    start = datetime(2026, 11, 19, 9, 30, tzinfo=UTC)  # 10:30 Paris
+    five = (start + timedelta(minutes=5)).isoformat()
+    eight_hours = (start + timedelta(hours=8)).isoformat()  # 18:30 Paris
+    assert _validate("create_event", _good_event(end=five), state) == []
+    # Eight hours is a legal duration, but it runs past the default 17:00 work end ...
+    assert _validate("create_event", _good_event(end=eight_hours), state) == [
+        "outside_working_hours"
+    ]
+    # ... and fits once the owner's working day is long enough.
+    long_day = {**scheduling_preferences(state), "work_end": "19:00"}
+    assert _validate("create_event", _good_event(end=eight_hours), state, scheduling=long_day) == []
+    assert _validate("create_event", _good_event(end=eight_hours), state, author="owner") == []
+
+
+def _availability_with(slots: list[tuple[str, str]], busy: list[tuple[str, str]]) -> dict[str, Any]:
+    return {
+        **AVAILABILITY,
+        "candidate_slots": [{"start": s, "end": e, "local": "-"} for s, e in slots],
+        "busy": [{"start": s, "end": e} for s, e in busy],
+    }
+
+
+def test_validate_long_meeting_overlapping_busy_time() -> None:
+    # Slot 10:30-11:00 Paris; busy from 11:00 Paris (10:00 UTC).
+    finding = _availability_with(
+        [("2026-11-19T09:30:00+00:00", "2026-11-19T10:00:00+00:00")],
+        [("2026-11-19T10:00:00+00:00", "2026-11-19T11:00:00+00:00")],
+    )
+    state = _state("sched-tomorrow-afternoon", read_findings=[finding])
+    one_hour = _good_event(end="2026-11-19T10:30:00+00:00")
+    assert _validate("create_event", one_hour, state) == ["time_overlaps_busy"]
+    # Ending 5 minutes before the busy block still violates the 10-minute buffer.
+    near = _good_event(end="2026-11-19T09:55:00+00:00")
+    assert _validate("create_event", near, state) == ["time_overlaps_busy"]
+    assert _validate("create_event", one_hour, state, author="owner") == []
+
+
+def test_validate_meeting_running_past_work_end() -> None:
+    # Slot 16:30-17:00 Paris; the meeting would end 17:30 Paris.
+    finding = _availability_with([("2026-11-19T15:30:00+00:00", "2026-11-19T16:00:00+00:00")], [])
+    state = _state("sched-tomorrow-afternoon", read_findings=[finding])
+    late = _good_event(start="2026-11-19T15:30:00+00:00", end="2026-11-19T16:30:00+00:00")
+    assert _validate("create_event", late, state) == ["outside_working_hours"]
+    assert _validate("create_event", late, state, author="owner") == []
+
+
+def test_validate_meeting_on_non_working_day() -> None:
+    # Sat 21 Nov 2026, 10:00 Paris, offered by a (hypothetical) availability read.
+    finding = _availability_with([("2026-11-21T09:00:00+00:00", "2026-11-21T09:30:00+00:00")], [])
+    state = _state("sched-tomorrow-afternoon", read_findings=[finding])
+    saturday = _good_event(start="2026-11-21T09:00:00+00:00", end="2026-11-21T09:30:00+00:00")
+    assert _validate("create_event", saturday, state) == ["outside_working_hours"]
+
+
+def test_validate_meeting_start_inside_slot_but_not_at_its_start() -> None:
+    state = _state("sched-tomorrow-afternoon", read_findings=[AVAILABILITY])
+    shifted = _good_event(start="2026-11-19T09:40:00+00:00", end="2026-11-19T10:00:00+00:00")
+    assert _validate("create_event", shifted, state) == ["time_not_from_availability"]
+
+
+def test_validate_meeting_with_broken_scheduling_preferences() -> None:
+    state = _state("sched-tomorrow-afternoon", read_findings=[AVAILABILITY])
+    broken = {"time_zone": "Mars/Olympus"}
+    assert _validate("create_event", _good_event(), state, scheduling=broken) == [
+        "invalid_preferences"
+    ]
+
+
+def test_validate_payload_scheduling_defaults_to_default_scheduling() -> None:
+    # Without `scheduling`, DEFAULT_SCHEDULING (UTC 09:00-17:00) applies: 09:30 UTC is fine,
+    # 16:45-17:15 UTC is not.
+    state = _state("sched-tomorrow-afternoon", read_findings=[AVAILABILITY])
+    args = {
+        "thread": _thread(state),
+        "findings": state["read_findings"],
+        "owner_identities": [OWNER],
+        "author": "model",
+    }
+    assert validate_payload("create_event", _good_event(), **args) == []  # type: ignore[arg-type]
+    finding = _availability_with([("2026-11-19T16:45:00+00:00", "2026-11-19T17:15:00+00:00")], [])
+    late = _good_event(start="2026-11-19T16:45:00+00:00", end="2026-11-19T17:15:00+00:00")
+    args["findings"] = [finding]
+    assert validate_payload("create_event", late, **args) == [  # type: ignore[arg-type]
+        "outside_working_hours"
+    ]
 
 
 def test_validate_owner_author_skips_participant_slot_and_evidence_checks() -> None:

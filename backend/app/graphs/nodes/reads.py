@@ -13,6 +13,7 @@ owner, and never has to invent availability.
 """
 
 import asyncio
+import logging
 from collections.abc import Awaitable
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -39,6 +40,8 @@ DEFAULT_SCHEDULING: dict[str, Any] = {
     "buffer_minutes": 10,
     "default_duration_minutes": 30,
 }
+
+logger = logging.getLogger(__name__)
 
 _DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -152,6 +155,9 @@ async def read_tools(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str
     try:
         update = await run(state, runtime.context)
     except _ToolFailed as failure:
+        # The traceback (with the provider's exception as its cause) stays in server logs;
+        # the finding, which the model reads, carries only the fixed code.
+        logger.exception("read tool %s failed: %s", tool, failure.code)
         update = {
             "read_findings": [
                 {

@@ -6,9 +6,13 @@ recipients, durations and required fields are checked by code). It returns error
 list means valid. It is shared by two callers:
 - `validate_proposal` (this module), for model-authored drafts (`author="model"`);
 - the edit-and-approve path (Task 9), for owner-edited payloads (`author="owner"`). The owner may
-  add recipients, pick another time and drop evidence, so those three checks are skipped; every
-  safety check (field shape, address parsing, header injection, body size, time zone,
-  end after start, duration bounds) still applies.
+  add recipients, pick another time and drop evidence, so those checks are skipped; every
+  safety check (field shape, canonical address parsing, header injection, body size, time
+  zone, end after start, duration bounds) still applies.
+
+For a model-drafted meeting the time must come from an availability read: `start` equals a
+candidate slot's start exactly, `[start - buffer, end + buffer)` misses that finding's busy
+intervals, and start and end lie inside working hours on a working day (owner's zone).
 
 Node: `validate_proposal(state, runtime)` returns a partial update with `validation` and, on
 failure, an owner-invisible `validation:<n>` finding (merged into `read_findings` by its reducer)
@@ -19,14 +23,15 @@ be, so the same state always takes the same path. It sends a valid draft to
 `persist_proposal`, the first invalid one back to `plan_next_step`, and a second one to `error`.
 """
 
-from collections.abc import Sequence
-from datetime import datetime, timedelta
+from collections.abc import Mapping, Sequence
+from datetime import datetime, time, timedelta
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from langgraph.runtime import Runtime
 
 from app.graphs.deps import GraphDeps
+from app.graphs.nodes.reads import DEFAULT_SCHEDULING, scheduling_preferences
 from app.graphs.nodes.shared import availability_findings, owner_identities, thread_participants
 from app.graphs.state import EmailState
 from app.mail.addresses import normalize_address
@@ -118,6 +123,11 @@ def _address_errors(
         except ValueError:
             errors.append(f"invalid_address:{_show(raw)}")
             continue
+        if raw != addr:
+            # Only bare lowercase addresses are sent; a display name or odd casing could hide
+            # a different recipient from the owner reviewing the proposal.
+            errors.append(f"non_canonical_address:{_show(raw)}")
+            continue
         if allowed is not None and addr not in allowed:
             errors.append(f"{not_allowed_code}:{_show(addr)}")
     return errors
@@ -129,9 +139,8 @@ def _known_evidence(
     known = {f"message:{m.provider_message_id}" for m in thread.messages}
     known.add(f"thread:{thread.provider_thread_id}")
     known |= {f"owner_input:{n}" for n in range(len(owner_inputs))}
-    for finding in availability_findings(findings):
-        key = str(finding["key"])
-        known |= {key, f"availability:{key}"}
+    # Finding keys the model sees verbatim: `availability:<start>:<end>` and `thread:<version>`.
+    known |= {str(f["key"]) for f in findings if f.get("kind") in ("availability", "thread")}
     return known
 
 
@@ -179,20 +188,71 @@ def _parse_aware(value: str) -> datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
-def _in_candidate_slot(start: datetime, findings: Sequence[dict[str, Any]]) -> bool:
+def _slot_finding(start: datetime, findings: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    """The availability finding that offered a candidate slot starting exactly at `start`."""
     for finding in availability_findings(findings):
         for slot in finding.get("candidate_slots", []):
-            if datetime.fromisoformat(slot["start"]) <= start < datetime.fromisoformat(slot["end"]):
-                return True
-    return False
+            if datetime.fromisoformat(slot["start"]) == start:
+                return finding
+    return None
+
+
+def _overlaps_busy(
+    start: datetime, end: datetime, finding: dict[str, Any], buffer: timedelta
+) -> bool:
+    lo, hi = start - buffer, end + buffer
+    return any(
+        lo < datetime.fromisoformat(b["end"]) and hi > datetime.fromisoformat(b["start"])
+        for b in finding.get("busy", [])
+    )
+
+
+def _within_working_hours(start: datetime, end: datetime, prefs: Mapping[str, Any]) -> bool:
+    """Start and end on the same working day, inside [work_start, work_end], owner-local."""
+    zone = ZoneInfo(str(prefs["time_zone"]))
+    lo, hi = start.astimezone(zone), end.astimezone(zone)
+    work_days = {int(d) for d in prefs["work_days"]}
+    return (
+        lo.date() == hi.date()
+        and lo.weekday() in work_days
+        and time.fromisoformat(prefs["work_start"]) <= lo.time()
+        and hi.time() <= time.fromisoformat(prefs["work_end"])
+    )
+
+
+def _availability_errors(
+    start: datetime | None,
+    end: datetime | None,
+    findings: Sequence[dict[str, Any]],
+    scheduling: Mapping[str, Any],
+) -> list[str]:
+    """Model drafts: the time must be one the availability read actually offered."""
+    if start is None:
+        return []
+    finding = _slot_finding(start, findings)
+    errors = [] if finding else ["time_not_from_availability"]
+    if end is None or end <= start:
+        return errors
+    prefs = {**DEFAULT_SCHEDULING, **scheduling}
+    try:
+        buffer = timedelta(minutes=int(prefs["buffer_minutes"]))
+        in_hours = _within_working_hours(start, end, prefs)
+    except (KeyError, TypeError, ValueError):  # ZoneInfoNotFoundError is a KeyError
+        return [*errors, "invalid_preferences"]
+    if finding and _overlaps_busy(start, end, finding, buffer):
+        errors.append("time_overlaps_busy")
+    if not in_hours:
+        errors.append("outside_working_hours")
+    return errors
 
 
 def _event_errors(
     p: dict[str, Any],
     findings: Sequence[dict[str, Any]],
     allowed: set[str] | None,
-    check_slot: bool,
+    scheduling: Mapping[str, Any] | None,
 ) -> list[str]:
+    """`scheduling=None` skips the availability checks (owner-authored payloads)."""
     errors: list[str] = []
     if p["calendar_id"] != "primary":
         errors.append("invalid_calendar")
@@ -217,8 +277,8 @@ def _event_errors(
             errors.append("end_not_after_start")
         elif not MIN_EVENT_DURATION <= end - start <= MAX_EVENT_DURATION:
             errors.append("duration_out_of_bounds")
-    if check_slot and start is not None and not _in_candidate_slot(start, findings):
-        errors.append("time_not_from_availability")
+    if scheduling is not None:
+        errors += _availability_errors(start, end, findings, scheduling)
 
     if p["send_updates"] not in ("all", "none"):
         errors.append("invalid_field:send_updates")
@@ -235,10 +295,13 @@ def validate_payload(
     owner_identities: Sequence[str],
     author: Author,
     owner_inputs: Sequence[Any] = (),
+    scheduling: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Return error codes for `payload` (empty means valid). See the module docstring.
 
-    `owner_inputs` is only needed to resolve `owner_input:<n>` evidence in model drafts.
+    `owner_inputs` resolves `owner_input:<n>` evidence in model drafts. `scheduling` is the
+    owner's scheduling preferences (missing keys fall back to `DEFAULT_SCHEDULING`);
+    model-drafted meetings must fit its working hours and buffers.
     """
     if kind not in _FIELDS:
         raise ValueError(f"unknown proposal kind {kind!r}")
@@ -252,7 +315,9 @@ def validate_payload(
     if kind == "send_reply":
         errors = _reply_errors(payload, thread, allowed)
     else:
-        errors = _event_errors(payload, findings, allowed, check_slot=by_model)
+        errors = _event_errors(
+            payload, findings, allowed, scheduling=(scheduling or {}) if by_model else None
+        )
     if by_model:
         errors += _evidence_errors(payload["evidence_refs"], thread, findings, owner_inputs)
     return errors
@@ -277,6 +342,7 @@ async def validate_proposal(state: EmailState, runtime: Runtime[GraphDeps]) -> d
             owner_identities=owner_identities(runtime.context.settings),
             author="model",
             owner_inputs=list(state.get("owner_inputs") or []),
+            scheduling=scheduling_preferences(state),
         )
 
     if not errors:
