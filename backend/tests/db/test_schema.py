@@ -120,15 +120,26 @@ async def test_server_defaults_and_timestamps_are_tz_aware(
 
 
 async def test_models_match_migration(db_url: str) -> None:
-    """Autogenerate finds no difference between the models and the migrated database."""
+    """Autogenerate finds no difference between the models and the migrated database.
+
+    LangGraph's checkpoint tables (created by `AsyncPostgresSaver.setup()`, not Alembic) may
+    share the database and are ignored.
+    """
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
     from sqlalchemy import create_engine
 
+    def ours(
+        obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
+    ) -> bool:
+        table = name if type_ == "table" else getattr(getattr(obj, "table", None), "name", "")
+        return not str(table).startswith("checkpoint")
+
     engine = create_engine(db_url)
     try:
         with engine.connect() as conn:
-            diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)
+            context = MigrationContext.configure(conn, opts={"include_object": ours})
+            diff = compare_metadata(context, Base.metadata)
     finally:
         engine.dispose()
     assert diff == []
