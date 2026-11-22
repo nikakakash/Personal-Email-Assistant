@@ -22,10 +22,13 @@ How a workflow survives a restart (the concepts, in order):
 - **Resuming.** The owner's decision creates a `resume_workflow` job (in the same
   transaction as the decision). The worker reads the checkpoint with `aget_state`, checks
   that the interrupt the owner answered is still pending (spec §9), and calls
-  `ainvoke(Command(resume=value), config, ...)`. LangGraph loads the checkpoint, re-runs the
-  interrupted node from its top, and this time `interrupt()` returns `value`. The graph object
-  and the saver can be brand new (a new process): everything needed is in Postgres, and the
-  runtime dependencies (`GraphDeps`) are passed fresh on each call, never checkpointed.
+  `ainvoke(Command(resume={interrupt_id: value}), config, ...)`. Keying the resume value by
+  the interrupt's id (a "resume map") binds it to exactly the interrupt that was checked: if
+  some other interrupt were pending by then, LangGraph would give it nothing, and its node
+  would simply pause again. LangGraph loads the checkpoint, re-runs the interrupted node from
+  its top, and this time `interrupt()` returns `value`. The graph object and the saver can be
+  brand new (a new process): everything needed is in Postgres, and the runtime dependencies
+  (`GraphDeps`) are passed fresh on each call, never checkpointed.
 - **Continuing after a crash.** If a worker dies mid-run, its job lease expires and another
   worker claims the job again. The checkpoint then has no pending interrupt but a non-empty
   `snap.next` (the step that was running). `ainvoke(None, config, ...)` means "continue from
@@ -33,11 +36,18 @@ How a workflow survives a restart (the concepts, in order):
   done its external write (`execute_action`) consults the action ledger first, so the write
   is reconciled, never repeated (see `app/graphs/nodes/execute.py`).
 
+Leases. The handler runs as its own task, supervised by `_supervise`, which renews the lease
+every `lease / 3`. If a renewal reports the lease lost, or no renewal has succeeded by
+`last_ok + lease - lease / 6` (the database may be unreachable), the handler is cancelled at
+once and nothing more is written for the job: another worker may own it now, and two workers
+must never drive the same thread.
+
 Job outcomes: success → projection, then `done`. `ActionInFlight` → the same job is queued
 again `IN_FLIGHT_RETRY` later (not a failure). `LLMTransientError` → the client already made
 its bounded attempts, so the run is `failed` (`llm_transient`) and the job fails without a
 retry. Any other exception → the run is `failed` (`internal_error`); the traceback goes to the
-server log, never into events or the job row.
+server log, never into events or the job row. A job claimed `MAX_JOB_ATTEMPTS` times without
+finishing is failed by `claim` itself (`max_attempts`), and its run with it.
 """
 
 import asyncio
@@ -54,14 +64,13 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import Command, StateSnapshot
+from langgraph.types import Command, Interrupt, StateSnapshot
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import Settings
 from app.db.models import AppFlags, EmailMessage, EmailThread, Job, WorkflowRun
-from app.db.session import make_sessionmaker
 from app.graphs.deps import GraphDeps
 from app.graphs.events import emit
 from app.graphs.nodes.execute import ActionInFlight
@@ -106,16 +115,16 @@ async def prepare_storage(settings: Settings) -> None:
     """
     async with AsyncPostgresSaver.from_conn_string(settings.checkpoint_database_url) as saver:
         await saver.setup()
-    sessionmaker = make_sessionmaker(settings)
+    engine = create_async_engine(settings.database_url)
     try:
-        async with sessionmaker() as session, session.begin():
-            await session.execute(
+        async with engine.begin() as conn:
+            await conn.execute(
                 insert(AppFlags)
                 .values(id=1, ingestion_paused=False, outbound_paused=False)
                 .on_conflict_do_nothing(index_elements=[AppFlags.id])
             )
     finally:
-        await sessionmaker.kw["bind"].dispose()
+        await engine.dispose()
 
 
 @dataclass(frozen=True)
@@ -189,8 +198,8 @@ async def _is_final(deps: GraphDeps, workflow_id: uuid.UUID) -> bool:
 async def _invoke(graph: Graph, deps: GraphDeps, target: _Target, value: Any) -> None:
     """Mark the run `running` (unless final), then run the graph until it ends or pauses.
 
-    `value` is the initial state (a new run), `Command(resume=...)` (answer an interrupt) or
-    `None` (continue from the last checkpoint).
+    `value` is the initial state (a new run), `Command(resume={interrupt_id: ...})` (answer
+    that interrupt) or `None` (continue from the last checkpoint).
     """
     async with deps.sessionmaker() as session, session.begin():
         await session.execute(
@@ -204,15 +213,22 @@ async def _invoke(graph: Graph, deps: GraphDeps, target: _Target, value: Any) ->
     await graph.ainvoke(value, target.config, context=deps, durability="sync")
 
 
-def _answers_pending(snap: StateSnapshot, payload: dict[str, Any]) -> bool:
-    """The job's interrupt is still pending (by id; or by review item, if the id was unknown)."""
+def _matching_interrupt(snap: StateSnapshot, payload: dict[str, Any]) -> Interrupt | None:
+    """The pending interrupt this job answers (by id; or by review item, if the id was unknown)."""
     pending = pending_interrupts(snap)
     expected = payload.get("interrupt_id")
     if expected is not None:
-        return any(i.id == expected for i in pending)
+        return next((i for i in pending if i.id == expected), None)
     item_id = payload.get("review_item_id")
-    return item_id is not None and any(
-        isinstance(i.value, dict) and i.value.get("review_item_id") == item_id for i in pending
+    if item_id is None:
+        return None
+    return next(
+        (
+            i
+            for i in pending
+            if isinstance(i.value, dict) and i.value.get("review_item_id") == item_id
+        ),
+        None,
     )
 
 
@@ -232,8 +248,10 @@ async def _run_resume(
     graph: Graph, deps: GraphDeps, target: _Target, payload: dict[str, Any]
 ) -> None:
     snap = await graph.aget_state(target.config, subgraphs=True)
-    if _answers_pending(snap, payload):
-        await _invoke(graph, deps, target, Command(resume=payload["resume"]))
+    matched = _matching_interrupt(snap, payload)
+    if matched is not None:
+        # Keyed by id: the value can only answer the interrupt validated just now.
+        await _invoke(graph, deps, target, Command(resume={matched.id: payload["resume"]}))
     elif (
         not pending_interrupts(snap) and snap.next and not await _is_final(deps, target.workflow_id)
     ):
@@ -260,33 +278,101 @@ async def _set_run_outcome(
         await emit(session, workflow_id, "run_failed", {"status": status, "error_code": error_code})
 
 
-async def _keep_alive(
+async def fail_exhausted_run(session: AsyncSession, job: Job) -> None:
+    """`claim` gave up on `job` (too many attempts): fail its run too, if it has one."""
+    workflow_id: uuid.UUID | None = None
+    if "workflow_id" in job.payload:
+        workflow_id = uuid.UUID(str(job.payload["workflow_id"]))
+    elif {"account_id", "provider_message_id"} <= job.payload.keys():
+        thread_id = graph_thread_id(job.payload["account_id"], job.payload["provider_message_id"])
+        workflow_id = await session.scalar(
+            select(WorkflowRun.id).where(WorkflowRun.graph_thread_id == thread_id)
+        )
+    log.error("job %s (%s) failed after %d attempts", job.id, job.kind, job.attempts)
+    if workflow_id is not None:
+        await _set_run_outcome(session, workflow_id, "failed", "internal_error")
+
+
+async def _work(graph: Graph, deps: GraphDeps, job: Job) -> tuple[str, _Target | None]:
+    """Run the job's handler; return its outcome code and the run it acted on."""
+    target: _Target | None = None
+    try:
+        if job.kind == "start_workflow":
+            target = await _start_target(deps, job.payload)
+            await _run_start(graph, deps, target)
+        elif job.kind == "resume_workflow":
+            target = await _resume_target(deps, job.payload)
+            await _run_resume(graph, deps, target, job.payload)
+        else:
+            raise ValueError(f"unknown job kind {job.kind!r}")
+        return "done", target
+    except ActionInFlight:
+        log.info("job %s: action in flight elsewhere; retrying later", job.id)
+        return "in_flight", target
+    except LLMTransientError:
+        log.warning("job %s: model unavailable after bounded retries", job.id)
+        return "llm_transient", target
+    except BudgetExceeded:  # nodes normally finalize as paused; kept as a safety net
+        log.warning("job %s: daily model budget exhausted", job.id)
+        return "budget", target
+    except Exception:
+        log.exception("job %s (%s) failed", job.id, job.kind)
+        return "internal_error", target
+
+
+async def _supervise(
+    work: "asyncio.Task[Any]",
     sessionmaker: async_sessionmaker[AsyncSession],
     job_id: uuid.UUID,
     worker_id: str,
     lease: timedelta,
-) -> None:
-    """Renew the lease every `lease / 3` until cancelled or the lease is lost."""
+) -> bool:
+    """Heartbeat while `work` runs; cancel it if the lease is lost. True if it was cancelled.
+
+    `last_ok` is when the last successful renewal *started* (the claim counts as one), so the
+    lease in the database lasts at least until `last_ok + lease`. The handler is cancelled as
+    soon as a renewal reports the lease gone, or once `last_ok + lease - lease / 6` passes
+    without a successful renewal (heartbeats failing, e.g. the database is unreachable).
+    """
+    loop = asyncio.get_running_loop()
+    interval, budget = lease.total_seconds() / 3, lease.total_seconds() * 5 / 6
+    last_ok = loop.time()
+    next_beat = last_ok + interval
     while True:
-        await asyncio.sleep(lease.total_seconds() / 3)
+        deadline = last_ok + budget
+        await asyncio.wait({work}, timeout=max(0.0, min(next_beat, deadline) - loop.time()))
+        if work.done():
+            return False
+        started = loop.time()
+        if started >= deadline:
+            reason = "no successful heartbeat in time"
+            break
+        next_beat = started + interval
         try:
-            async with sessionmaker() as session, session.begin():
-                alive = await queue.heartbeat(session, job_id, worker_id, lease)
-        except Exception:
-            log.exception("heartbeat for job %s failed", job_id)
+            async with asyncio.timeout(deadline - started):
+                async with sessionmaker() as session, session.begin():
+                    alive = await queue.heartbeat(session, job_id, worker_id, lease)
+        except Exception:  # TimeoutError included; retried until the deadline
+            log.warning("heartbeat for job %s failed", job_id, exc_info=True)
             continue
         if not alive:
-            log.warning("job %s: lease lost to another worker", job_id)
-            return
+            reason = "lease taken over"
+            break
+        last_ok = started
+    log.warning("job %s: lease lost (%s); cancelling the handler", job_id, reason)
+    work.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await work
+    return True
 
 
 async def _finish(
+    graph: Graph,
     deps: GraphDeps,
     job: Job,
     worker_id: str,
     target: _Target | None,
     outcome: str,
-    graph: Graph,
 ) -> None:
     """Record the job's outcome in one transaction, only while this worker holds the lease."""
     snap = (
@@ -317,42 +403,23 @@ async def _finish(
 async def _handle(
     graph: Graph, deps: GraphDeps, job: Job, worker_id: str, lease: timedelta
 ) -> None:
-    heart = asyncio.create_task(_keep_alive(deps.sessionmaker, job.id, worker_id, lease))
-    target: _Target | None = None
+    work = asyncio.create_task(_work(graph, deps, job))
     try:
-        try:
-            if job.kind == "start_workflow":
-                target = await _start_target(deps, job.payload)
-                await _run_start(graph, deps, target)
-            elif job.kind == "resume_workflow":
-                target = await _resume_target(deps, job.payload)
-                await _run_resume(graph, deps, target, job.payload)
-            else:
-                raise ValueError(f"unknown job kind {job.kind!r}")
-            outcome = "done"
-        except ActionInFlight:
-            log.info("job %s: action in flight elsewhere; retrying later", job.id)
-            outcome = "in_flight"
-        except LLMTransientError:
-            log.warning("job %s: model unavailable after bounded retries", job.id)
-            outcome = "llm_transient"
-        except BudgetExceeded:  # nodes normally finalize as paused; kept as a safety net
-            log.warning("job %s: daily model budget exhausted", job.id)
-            outcome = "budget"
-        except Exception:
-            log.exception("job %s (%s) failed", job.id, job.kind)
-            outcome = "internal_error"
+        if await _supervise(work, deps.sessionmaker, job.id, worker_id, lease):
+            return  # another worker may own the job now: write nothing
     finally:
-        heart.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heart
-    await _finish(deps, job, worker_id, target, outcome, graph)
+        if not work.done():  # we were cancelled ourselves (shutdown, a killed process)
+            work.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await work
+    outcome, target = work.result()
+    await _finish(graph, deps, job, worker_id, target, outcome)
 
 
 async def run_once(graph: Graph, deps: GraphDeps, *, worker_id: str, lease: timedelta) -> bool:
     """Claim and handle at most one job; return whether one was handled."""
     async with deps.sessionmaker() as session, session.begin():
-        job = await queue.claim(session, worker_id, lease)
+        job = await queue.claim(session, worker_id, lease, on_exhausted=fail_exhausted_run)
     if job is None:
         return False
     log.info("job %s (%s) claimed, attempt %d", job.id, job.kind, job.attempts)
@@ -379,7 +446,8 @@ async def run_worker(
     """
     worker_id = worker_id or default_worker_id()
     lease = timedelta(seconds=settings.worker_lease_seconds)
-    sessionmaker = make_sessionmaker(settings)
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     deps = deps_factory(settings, sessionmaker, MockFaults())
     try:
         async with AsyncPostgresSaver.from_conn_string(settings.checkpoint_database_url) as saver:
@@ -396,4 +464,4 @@ async def run_worker(
                         await asyncio.wait_for(stop.wait(), poll_interval)
             log.info("worker %s stopped", worker_id)
     finally:
-        await sessionmaker.kw["bind"].dispose()
+        await engine.dispose()

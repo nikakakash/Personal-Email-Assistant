@@ -9,9 +9,10 @@ import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from langgraph.types import Command
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -33,10 +34,12 @@ from app.db.models import (
 from app.graphs.deps import GraphDeps
 from app.graphs.parent import GRAPH_VERSION
 from app.ingestion.ingest import ingest_message
+from app.jobs import queue
 from app.jobs.projection import pending_interrupts
-from app.jobs.queue import claim, enqueue
-from app.jobs.worker import Graph, run_once
+from app.jobs.queue import MAX_JOB_ATTEMPTS, claim, enqueue
+from app.jobs.worker import Graph, fail_exhausted_run, run_once
 from app.llm.client import BudgetExceeded, LLMCall, LLMResult, LLMTransientError, T
+from app.llm.scripted import ScriptedLLMClient
 from app.prompts import PROMPT_VERSIONS
 from app.providers.fixtures import load_fixture
 from app.providers.interfaces import OutgoingReply, ProviderResult, ProviderTimeout, ThreadSnapshot
@@ -499,13 +502,13 @@ async def test_heartbeat_keeps_lease_while_handler_runs(
     sessionmaker: Session, make_deps: DepsBuilder, worker_settings: Any
 ) -> None:
     await _ingest(sessionmaker)
-    lease = timedelta(seconds=0.6)
-    llm = SlowBudgetLLM(seconds=2.0)
+    lease = timedelta(seconds=2)
+    llm = SlowBudgetLLM(seconds=5.0)
 
     async with open_graph(worker_settings.checkpoint_database_url) as graph:
         task = asyncio.create_task(run_once(graph, make_deps(llm=llm), worker_id="w1", lease=lease))
         await asyncio.wait_for(llm.started.wait(), 10)
-        await asyncio.sleep(1.2)  # two lease lengths: only heartbeats keep it alive
+        await asyncio.sleep(4)  # two lease lengths: only heartbeats keep it alive
         async with sessionmaker() as s, s.begin():
             assert await claim(s, "w2", lease) is None
         assert await task
@@ -514,34 +517,272 @@ async def test_heartbeat_keeps_lease_while_handler_runs(
     assert (job.state, job.attempts) == ("done", 1)
 
 
-async def test_resume_for_another_interrupt_is_noop(
-    sessionmaker: Session, make_deps: DepsBuilder, worker_settings: Any
+class GraphSpy:
+    """Delegates to a compiled graph and records every input passed to `ainvoke`."""
+
+    def __init__(self, graph: Graph) -> None:
+        self.graph = graph
+        self.inputs: list[Any] = []
+
+    @property
+    def resumes(self) -> list[Any]:
+        return [i.resume for i in self.inputs if isinstance(i, Command)]
+
+    async def ainvoke(self, value: Any, *args: Any, **kwargs: Any) -> Any:
+        self.inputs.append(value)
+        return await self.graph.ainvoke(value, *args, **kwargs)
+
+    async def aget_state(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.graph.aget_state(*args, **kwargs)
+
+
+class HangingThreadRead:
+    """Mail provider whose thread read (preflight's first call) hangs until cancelled."""
+
+    def __init__(self, inner: MockMailProvider) -> None:
+        self.inner = inner
+        self.entered = asyncio.Event()
+        self.cancelled = False
+
+    async def get_thread(self, provider_thread_id: str, limit: int = 20) -> ThreadSnapshot:
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+    async def send_reply(self, req: OutgoingReply, operation_id: str) -> ProviderResult:
+        return await self.inner.send_reply(req, operation_id)
+
+    async def find_sent(self, operation_id: str) -> ProviderResult | None:
+        return await self.inner.find_sent(operation_id)
+
+
+@pytest.mark.parametrize("heartbeat_result", ["lease_taken", "db_error"])
+async def test_handler_cancelled_when_lease_lost(
+    sessionmaker: Session,
+    make_deps: DepsBuilder,
+    worker_settings: Any,
+    owner: Owner,
+    mail: MockMailProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    heartbeat_result: str,
 ) -> None:
-    """A resume job whose interrupt is not the pending one never answers the pending one."""
+    owner_id = owner.id
+    url = worker_settings.checkpoint_database_url
+    lease = timedelta(seconds=6)  # cancelled at 2 s (lease taken) or 5 s (no renewal)
+    await _pause_for_approval(sessionmaker, make_deps, url)
+    await _approve(sessionmaker, owner_id, mail)
+    (resume,) = await _jobs(sessionmaker, "resume_workflow")
+    real_heartbeat = queue.heartbeat
+
+    async def broken_heartbeat(*args: Any, **kwargs: Any) -> bool:
+        if heartbeat_result == "db_error":
+            raise OSError("database unreachable")
+        return False
+
+    monkeypatch.setattr(queue, "heartbeat", broken_heartbeat)
+    hanging = HangingThreadRead(mail)
+    async with open_graph(url) as graph:
+        spy = GraphSpy(graph)
+        task = asyncio.create_task(
+            run_once(
+                cast(Graph, spy),
+                make_deps(AFTER_APPROVAL, mail=hanging),
+                worker_id="w1",
+                lease=lease,
+            )
+        )
+        await asyncio.wait_for(hanging.entered.wait(), 10)
+        assert await asyncio.wait_for(task, 10)  # run_once returns: the handler was cancelled
+        assert hanging.cancelled
+        async with sessionmaker() as s, s.begin():  # ...before w1's lease ran out in the DB
+            assert await claim(s, "w2", lease) is None
+
+    (job,) = await _jobs(sessionmaker, "resume_workflow")
+    assert (job.state, job.lease_owner, job.error) == ("running", "w1", None)  # nothing written
+    assert await _count(sessionmaker, MockOutbox) == 0
+    assert spy.resumes == [{resume.payload["interrupt_id"]: resume.payload["resume"]}]
+
+    monkeypatch.setattr(queue, "heartbeat", real_heartbeat)
+    async with sessionmaker() as s, s.begin():  # w1's lease expires
+        await s.execute(update(Job).where(Job.id == job.id).values(lease_until=func.now()))
+    async with open_graph(url) as graph:
+        spy2 = GraphSpy(graph)
+        assert await _work(cast(Graph, spy2), make_deps(AFTER_APPROVAL), "w2")
+
+    assert spy2.inputs == [None]  # w2 continues; the resume reached the graph only once
+    assert await _count(sessionmaker, MockOutbox) == 1
+    assert (await _run(sessionmaker)).status == "done_with_actions"
+
+
+async def test_resume_with_old_interrupt_id_answers_nothing(
+    sessionmaker: Session,
+    make_deps: DepsBuilder,
+    worker_settings: Any,
+    owner: Owner,
+    mail: MockMailProvider,
+) -> None:
+    """The owner gave feedback on proposal 1; a late resume for its interrupt must not answer
+    the newer interrupt for proposal 2, neither through the worker nor through LangGraph."""
+    owner_id = owner.id
     url = worker_settings.checkpoint_database_url
     await _pause_for_approval(sessionmaker, make_deps, url)
+    proposal_id, approve = await _decision(sessionmaker)
+    old_interrupt = approve.interrupt_id
+    feedback = DecisionIn(
+        decision="feedback",
+        proposal_revision=approve.proposal_revision,
+        payload_hash=approve.payload_hash,
+        interrupt_id=old_interrupt,
+        request_id=uuid.uuid4().hex,
+        feedback="Shorter, please.",
+    )
+    async with sessionmaker() as s:
+        await decide_proposal(s, owner_id, proposal_id, feedback, mail=mail)
+    redraft: dict[str, Any] = {
+        MID: {
+            "plan": [{"action": "draft_reply", "reason": "Apply the feedback."}],
+            "draft_reply": [
+                {
+                    "to": [SENDER],
+                    "cc": [],
+                    "body_text": "Friday 13:00 UTC works.",
+                    "evidence_refs": [f"message:{MID}", AVAILABILITY],
+                }
+            ],
+        }
+    }
     run = await _run(sessionmaker)
-    async with sessionmaker() as s, s.begin():
-        await enqueue(
-            s,
-            "resume_workflow",
-            "resume:old-interrupt",
-            {
-                "workflow_id": str(run.id),
-                "interrupt_id": "old-interrupt",
-                "resume": {"decision": "reject"},
-            },
-        )
-
+    config: Any = {"configurable": {"thread_id": run.graph_thread_id}}
     async with open_graph(url) as graph:
-        assert await _work(graph, make_deps())
-        snap = await graph.aget_state(
-            {"configurable": {"thread_id": run.graph_thread_id}}, subgraphs=True
-        )
+        assert await _work(graph, make_deps(redraft))  # pauses on proposal 2
+        (newer,) = pending_interrupts(await graph.aget_state(config, subgraphs=True))
+        assert newer.id != old_interrupt
+        async with sessionmaker() as s, s.begin():  # a late resume for the old interrupt
+            await enqueue(
+                s,
+                "resume_workflow",
+                "resume:late",
+                {
+                    "workflow_id": str(run.id),
+                    "interrupt_id": old_interrupt,
+                    "resume": {"decision": "reject"},
+                },
+            )
 
-    assert len(pending_interrupts(snap)) == 1  # still waiting for the owner
-    (job,) = await _jobs(sessionmaker, "resume_workflow")
-    assert job.state == "done"
+        spy = GraphSpy(graph)
+        assert await _work(cast(Graph, spy), make_deps())
+        assert spy.inputs == []  # the worker never invoked the graph
+
+        # Even straight through LangGraph, a value keyed by the old id answers nothing.
+        await graph.ainvoke(
+            Command(resume={old_interrupt: {"decision": "reject"}}),
+            config,
+            context=make_deps(),
+            durability="sync",
+        )
+        (still,) = pending_interrupts(await graph.aget_state(config, subgraphs=True))
+
+    assert still.id == newer.id
+    late = next(
+        j for j in await _jobs(sessionmaker, "resume_workflow") if j.dedup_key == "resume:late"
+    )
+    assert late.state == "done"
     assert (await _run(sessionmaker)).status == "waiting_review"
     async with sessionmaker() as s:
-        assert (await s.execute(select(Proposal.status))).scalar_one() == "awaiting_approval"
+        statuses = (await s.execute(select(Proposal.status).order_by(Proposal.created_at))).all()
+    assert [p for (p,) in statuses] == ["superseded", "awaiting_approval"]
+
+
+async def test_claim_fails_job_after_max_attempts(
+    sessionmaker: Session,
+    make_deps: DepsBuilder,
+    worker_settings: Any,
+    owner: Owner,
+    mail: MockMailProvider,
+) -> None:
+    owner_id = owner.id
+    await _pause_for_approval(sessionmaker, make_deps, worker_settings.checkpoint_database_url)
+    await _approve(sessionmaker, owner_id, mail)
+    (resume,) = await _jobs(sessionmaker, "resume_workflow")
+    async with sessionmaker() as s, s.begin():
+        # The job has crashed its worker MAX_JOB_ATTEMPTS times; its last lease has expired.
+        await s.execute(
+            update(Job)
+            .where(Job.id == resume.id)
+            .values(
+                state="running",
+                attempts=MAX_JOB_ATTEMPTS,
+                lease_owner="w-dead",
+                lease_until=func.now() - LEASE,
+            )
+        )
+        other = await enqueue(s, "start_workflow", "other-job", {"n": 1})
+
+    async with sessionmaker() as s, s.begin():
+        claimed = await claim(s, "w2", LEASE, on_exhausted=fail_exhausted_run)
+
+    assert claimed is not None and claimed.id == other.id  # skipped to the next job
+    async with sessionmaker() as s:
+        job = await s.get_one(Job, resume.id)
+        (payload,) = (
+            await s.execute(
+                select(WorkflowEvent.payload).where(WorkflowEvent.event_type == "run_failed")
+            )
+        ).scalars()
+    assert (job.state, job.error, job.lease_owner, job.attempts) == (
+        "failed",
+        "max_attempts",
+        None,
+        MAX_JOB_ATTEMPTS,
+    )
+    run = await _run(sessionmaker)
+    assert (run.status, run.error_code) == ("failed", "internal_error")
+    assert payload == {"status": "failed", "error_code": "internal_error"}
+
+
+class HangOnPlan:
+    """Scripted model that hangs on its first planning call (the worker dies there)."""
+
+    def __init__(self, scripts: dict[str, Any]) -> None:
+        self.inner = ScriptedLLMClient(scripts)
+        self.planning = asyncio.Event()
+
+    async def structured(self, call: LLMCall[T]) -> LLMResult[T]:
+        if call.purpose == "plan":
+            self.planning.set()
+            await asyncio.Event().wait()
+        return await self.inner.structured(call)
+
+
+async def test_start_job_continues_after_crash(
+    sessionmaker: Session, make_deps: DepsBuilder, worker_settings: Any
+) -> None:
+    url = worker_settings.checkpoint_database_url
+    await _ingest(sessionmaker)
+    llm = HangOnPlan(BEFORE_APPROVAL)
+    async with open_graph(url) as doomed:
+        task = asyncio.create_task(_work(doomed, make_deps(llm=llm), "w1"))
+        await asyncio.wait_for(llm.planning.wait(), 10)
+        task.cancel()  # killed after triage, during the first planning call
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    (start,) = await _jobs(sessionmaker, "start_workflow")
+    assert (start.state, start.lease_owner) == ("running", "w1")
+    async with sessionmaker() as s, s.begin():
+        await s.execute(update(Job).where(Job.id == start.id).values(lease_until=func.now()))
+
+    # No triage output left: a fresh start (instead of a continuation) would fail.
+    rest: dict[str, Any] = {MID: {k: v for k, v in BEFORE_APPROVAL[MID].items() if k != "triage"}}
+    async with open_graph(url) as restarted:
+        spy = GraphSpy(restarted)
+        assert await _work(cast(Graph, spy), make_deps(rest), "w2")
+
+    assert spy.inputs == [None]  # ainvoke(None): continue from the last checkpoint
+    (start,) = await _jobs(sessionmaker, "start_workflow")
+    assert (start.state, start.attempts) == ("done", 2)
+    assert (await _run(sessionmaker)).status == "waiting_review"
+    await _decision(sessionmaker)  # the approval interrupt was projected onto its item

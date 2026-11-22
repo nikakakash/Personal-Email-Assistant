@@ -9,14 +9,16 @@ why every job handler must be safe to run twice.
 Leases use the database clock (`now()`) only, never the worker's clock, so workers on machines
 with skewed clocks still agree on whether a lease is live.
 
-`complete`, `fail` and `reschedule` are compare-and-set on `lease_owner`: a worker whose lease
-expired (and whose job another worker has since claimed) changes nothing and gets `False`.
+`complete`, `fail`, `reschedule` and `heartbeat` are compare-and-set on `lease_owner`: a worker
+whose lease expired (and whose job another worker has since claimed) changes nothing and gets
+`False`.
 
 None of these functions commit; the caller owns the transaction (as with `enqueue`). Commit a
 claim right away, so the row lock is held only for the claim itself.
 """
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
@@ -29,6 +31,10 @@ from app.db.models import Job
 
 # Key of the transaction-level advisory lock that serializes claims (see `claim`).
 _CLAIM_LOCK_KEY = 0x6A6F6273  # "jobs"
+# A job claimed this many times without finishing is failed instead of claimed again.
+MAX_JOB_ATTEMPTS = 5
+
+Exhausted = Callable[[AsyncSession, Job], Awaitable[None]]
 
 
 async def enqueue(
@@ -54,12 +60,23 @@ async def enqueue(
     return job
 
 
-async def claim(session: AsyncSession, worker_id: str, lease: timedelta) -> Job | None:
+async def claim(
+    session: AsyncSession,
+    worker_id: str,
+    lease: timedelta,
+    *,
+    on_exhausted: Exhausted | None = None,
+) -> Job | None:
     """Claim the next runnable job for `worker_id`, or return None.
 
     Runnable: `queued` and due (`scheduled_at <= now()`), or `running` with an expired lease
     (its worker died). A job is skipped while another job with the same `serial_key` (the
     conversation) is `running` under a live lease, so one thread's jobs never run at once.
+
+    A runnable job already claimed `MAX_JOB_ATTEMPTS` times is not claimed again: it is marked
+    `failed` (`max_attempts`), `on_exhausted(session, job)` runs in the same transaction (the
+    worker fails the job's run there), and the next runnable job is tried. This stops a job
+    that crashes its worker every time from being retried forever.
 
     `FOR UPDATE SKIP LOCKED` makes concurrent claimers skip a row another transaction is
     claiming instead of waiting for it. The serial-key check reads *other* rows, though, and
@@ -77,7 +94,7 @@ async def claim(session: AsyncSession, worker_id: str, lease: timedelta) -> Job 
         other.lease_until >= func.now(),
     )
     candidate = (
-        select(Job.id)
+        select(Job.id, Job.attempts)
         .where(
             or_(
                 and_(Job.state == "queued", Job.scheduled_at <= func.now()),
@@ -89,9 +106,24 @@ async def claim(session: AsyncSession, worker_id: str, lease: timedelta) -> Job 
         .limit(1)
         .with_for_update(skip_locked=True, of=Job)
     )
-    job_id = (await session.execute(candidate)).scalar_one_or_none()
-    if job_id is None:
-        return None
+    while True:
+        row = (await session.execute(candidate)).one_or_none()
+        if row is None:
+            return None
+        job_id, attempts = row
+        if attempts < MAX_JOB_ATTEMPTS:
+            break
+        exhausted = (
+            await session.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .values(state="failed", error="max_attempts", lease_owner=None, lease_until=None)
+                .returning(Job)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        if on_exhausted is not None:
+            await on_exhausted(session, exhausted)
     stmt = (
         update(Job)
         .where(Job.id == job_id)

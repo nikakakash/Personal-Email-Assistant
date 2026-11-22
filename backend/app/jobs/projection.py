@@ -19,6 +19,14 @@ subgraphs=True)`. It returns a `StateSnapshot`:
   also loads the subgraph's own checkpoint into `task.state`, another `StateSnapshot` with its
   own tasks, so the walk below recurses into it.
 
+Trust the innermost level. A subgraph's interrupt is also listed on the parent's `response`
+task (and in the parent's `snap.interrupts`), and the parent keeps listing it until the whole
+subgraph node finishes: the parent only checkpoints between its own steps. So after a resume
+that answered the interrupt and then crashed inside the subgraph (say, during `preflight`),
+the parent still shows the interrupt as pending while the subgraph, which has moved on,
+shows none. Only the subgraph's view is current, so for a task that has a subgraph state the
+walk uses that state and ignores the parent's copy.
+
 While the run is paused inside the subgraph, the parent's `snap.values` do not include the
 subgraph's updates (they flow back only when the subgraph finishes), so the review item id is
 read from the interrupt's value, which every interrupt node sets:
@@ -38,21 +46,20 @@ from app.graphs.nodes.finalize import FINAL_STATUSES
 
 
 def pending_interrupts(snap: StateSnapshot) -> list[Interrupt]:
-    """Every interrupt still waiting for an answer, from the parent and all subgraphs.
+    """Every interrupt still waiting for an answer, read at the innermost level.
 
-    The same interrupt can appear at several levels (a subgraph's interrupt is also listed on
-    the parent task that runs the subgraph), so the result is de-duplicated by id.
+    Interrupts are collected from tasks without a subgraph; a task running a subgraph is
+    represented by the subgraph's own snapshot (see the module docstring). De-duplicated by id.
     """
     found: dict[str, Interrupt] = {}
 
     def walk(s: StateSnapshot) -> None:
-        for interrupt in s.interrupts:
-            found.setdefault(interrupt.id, interrupt)
         for task in s.tasks:
-            for interrupt in task.interrupts:
-                found.setdefault(interrupt.id, interrupt)
             if isinstance(task.state, StateSnapshot):
                 walk(task.state)
+            else:
+                for interrupt in task.interrupts:
+                    found.setdefault(interrupt.id, interrupt)
 
     walk(snap)
     return list(found.values())

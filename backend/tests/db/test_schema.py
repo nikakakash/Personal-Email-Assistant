@@ -119,6 +119,12 @@ async def test_server_defaults_and_timestamps_are_tz_aware(
     assert run.created_at.tzinfo is not None
 
 
+# Created by `AsyncPostgresSaver.setup()` (langgraph-checkpoint-postgres), not by Alembic.
+CHECKPOINT_TABLES = frozenset(
+    {"checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"}
+)
+
+
 async def test_models_match_migration(db_url: str) -> None:
     """Autogenerate finds no difference between the models and the migrated database.
 
@@ -132,8 +138,8 @@ async def test_models_match_migration(db_url: str) -> None:
     def ours(
         obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
     ) -> bool:
-        table = name if type_ == "table" else getattr(getattr(obj, "table", None), "name", "")
-        return not str(table).startswith("checkpoint")
+        table = name if type_ == "table" else getattr(getattr(obj, "table", None), "name", None)
+        return table not in CHECKPOINT_TABLES
 
     engine = create_engine(db_url)
     try:
