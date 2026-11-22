@@ -1,0 +1,46 @@
+[project]
+name = "email-assistant-backend"
+version = "0.1.0"
+description = "Personal email assistant backend (FastAPI + LangGraph)"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.20.1",
+    "anthropic>=2.12.0",
+    "fastapi>=0.165.0",
+    "itsdangerous>=2.2.0",
+    "langgraph>=1.2.24",
+    "langgraph-checkpoint-postgres>=3.2.1",
+    "nh3>=0.3.8",
+    "psycopg[binary,pool]>=3.3.9",
+    "pydantic-settings>=2.16.3",
+    "sqlalchemy[asyncio]>=2.1.9",
+    "sse-starlette>=3.7.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "ruff>=0.17.6",
+]
