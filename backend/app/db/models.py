@@ -172,6 +172,8 @@ class Proposal(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="awaiting_approval")
     active_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    # Set by `create_proposal` so a re-run graph node gets the existing proposal back.
+    idempotency_key: Mapped[str | None] = mapped_column(Text, unique=True)
     created_at: Mapped[datetime] = _ts()
 
 
