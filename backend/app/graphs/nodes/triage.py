@@ -9,6 +9,10 @@ a refusal, output that stays malformed after the adapter's repair attempt, or
 `BudgetExceeded` pauses the run. `LLMTransientError` is not caught: it propagates out of the
 graph so the worker can retry later (the checkpoint before this node is kept).
 
+The outcome (classification and reason) is also written to `workflow_runs` in a short
+transaction of its own after the model call, so the review queue can show it. That write is
+an idempotent UPDATE: if LangGraph re-runs the node, it just writes the new values again.
+
 Conditional edge: `route_after_triage(state)` is a pure function of state that names the next
 node; `add_conditional_edges` maps its return values to nodes.
 """
@@ -17,7 +21,9 @@ from typing import Any, Literal
 from uuid import UUID
 
 from langgraph.runtime import Runtime
+from sqlalchemy import update
 
+from app.db.models import WorkflowRun
 from app.graphs.deps import GraphDeps
 from app.graphs.nodes.shared import preferences_context, user_content
 from app.graphs.schemas import TriageDecision
@@ -37,8 +43,32 @@ def _needs_review(reason: str) -> dict[str, Any]:
     }
 
 
+async def _record_triage(
+    deps: GraphDeps, workflow_id: str, outcome: dict[str, Any]
+) -> dict[str, Any]:
+    """Store the classification and reason on the run; return `outcome` unchanged."""
+    async with deps.sessionmaker() as session, session.begin():
+        await session.execute(
+            update(WorkflowRun)
+            .where(WorkflowRun.id == UUID(workflow_id))
+            .values(
+                classification=outcome["classification"],
+                triage_reason=outcome["decision_summary"],
+            )
+        )
+    return outcome
+
+
 async def triage(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
     """Classify the thread as ignore, notify or respond."""
+    outcome = await _classify(state, runtime)
+    if outcome.get("status") == "paused":
+        return outcome
+    return await _record_triage(runtime.context, state["workflow_id"], outcome)
+
+
+async def _classify(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
+    """The model's triage decision as a state update (or a paused / needs-review update)."""
     prompt = load_prompt("triage")
     call = LLMCall(
         purpose="triage",

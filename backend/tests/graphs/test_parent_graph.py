@@ -61,6 +61,8 @@ async def test_ignore_route_finishes_no_action(
     assert result["status"] == "done_no_action"
     run = await run_row(sessionmaker, seeded)
     assert (run.status, run.step_count, run.error_code) == ("done_no_action", 0, None)
+    # triage stores its outcome on the run for the review queue and workflow lists.
+    assert (run.classification, run.triage_reason) == ("ignore", "Classified as ignore.")
     assert await count(sessionmaker, ReviewItem) == 0
     assert await count(sessionmaker, AuditEvent, AuditEvent.event_type == "run_completed") == 1
     assert await _events(sessionmaker, seeded) == [

@@ -178,7 +178,12 @@ class ActionExecutor:
             if approval.decision not in ("approve", "edit_approve"):
                 raise ExecutionRefused("not_approved")
             revision = await session.get_one(ProposalRevision, approval.proposal_revision_id)
-            proposal = await session.get_one(Proposal, revision.proposal_id)
+            # FOR SHARE: a concurrent cancel (which locks the proposal FOR UPDATE, then looks
+            # for an Action row) either sees this claim's row or commits first, and then this
+            # read sees `cancelled_before_execution` and refuses.
+            proposal = await session.get_one(
+                Proposal, revision.proposal_id, with_for_update={"read": True}
+            )
             if revision.revision != proposal.active_revision:
                 raise ExecutionRefused("revision_not_active")
             if proposal.status not in ("approved", "executed"):

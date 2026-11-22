@@ -133,6 +133,9 @@ class WorkflowRun(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="running")
     step_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     error_code: Mapped[str | None] = mapped_column(Text)
+    # Written by the `triage` node: ignore / notify / respond and its short reason.
+    classification: Mapped[str | None] = mapped_column(Text)
+    triage_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _ts()
     updated_at: Mapped[datetime] = _ts()
 
