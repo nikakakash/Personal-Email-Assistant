@@ -12,7 +12,7 @@ from langgraph.types import Command
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.actions.executor import operation_id_for
+from app.actions.executor import IN_FLIGHT_GRACE, operation_id_for
 from app.db.models import (
     Action,
     Approval,
@@ -442,6 +442,45 @@ async def test_validate_budget_stop_route(
     assert (run.status, run.error_code) == ("paused", "budget")
 
 
+class CountingLLM:
+    """Scripted outputs; keeps the purpose of every call."""
+
+    def __init__(self, inner: ScriptedLLMClient) -> None:
+        self.inner = inner
+        self.purposes: list[str] = []
+
+    async def structured(self, call: LLMCall[T]) -> LLMResult[T]:
+        self.purposes.append(call.purpose)
+        return await self.inner.structured(call)
+
+
+class SlowMail:
+    """The mock mail provider, except that `get_thread` hangs once enabled.
+
+    Set `hang = True` to hang every read, or `hang_after = n` to let n more reads through.
+    """
+
+    def __init__(self, inner: MockMailProvider) -> None:
+        self.inner = inner
+        self.hang = False
+        self.hang_after: int | None = None
+
+    async def get_thread(self, provider_thread_id: str, limit: int = 20) -> ThreadSnapshot:
+        if self.hang_after is not None:
+            if self.hang_after == 0:
+                self.hang = True
+            self.hang_after -= 1
+        if self.hang:
+            await asyncio.sleep(5)
+        return await self.inner.get_thread(provider_thread_id, limit)
+
+    async def send_reply(self, req: OutgoingReply, operation_id: str) -> ProviderResult:
+        return await self.inner.send_reply(req, operation_id)
+
+    async def find_sent(self, operation_id: str) -> ProviderResult | None:
+        return await self.inner.find_sent(operation_id)
+
+
 async def _raise_in_flight(
     graph: Graph,
     deps: GraphDeps,
@@ -508,7 +547,7 @@ async def test_execute_in_flight_raises(
     assert (await run_row(sessionmaker, seeded)).status == "done_with_actions"
 
 
-async def test_retry_after_in_flight_rechecks_context(
+async def test_retry_in_flight_with_changed_thread_never_goes_stale(
     graph: Graph,
     make_deps: DepsFactory,
     seeded: SeededRun,
@@ -516,31 +555,125 @@ async def test_retry_after_in_flight_rechecks_context(
     owner: Owner,
     mail: MockMailProvider,
 ) -> None:
-    """A retry re-runs the preflight checks: a thread that changed meanwhile goes stale."""
-    deps = make_deps(_reply_script(seeded.provider_message_id))
-    await _raise_in_flight(graph, deps, seeded, sessionmaker, owner, mail)
+    """Ledger first: with a claimed action, a changed thread does not make the retry stale."""
+    llm = CountingLLM(ScriptedLLMClient(_reply_script(seeded.provider_message_id)))
+    deps = make_deps(llm=llm)
+    action_id = await _raise_in_flight(graph, deps, seeded, sessionmaker, owner, mail)
     await _add_followup(sessionmaker, seeded)
+
+    with pytest.raises(ActionInFlight):  # still the other caller's send
+        await run_graph(graph, None, seeded, deps)
+
+    (proposal,) = await _proposals(sessionmaker)
+    assert proposal.status == "approved"  # not flipped to stale mid-send
+    async with sessionmaker() as s:  # the other caller finishes and records its result
+        await s.execute(
+            update(Action)
+            .where(Action.id == action_id)
+            .values(status="succeeded", provider_ref="sent-by-other-caller")
+        )
+        await s.execute(update(Proposal).values(status="executed"))
+        await s.commit()
 
     done = await run_graph(graph, None, seeded, deps)
 
-    assert done.get("action_results", []) == []
-    stale = next(f for f in done["read_findings"] if f["kind"] == "stale")
-    assert stale["reason"] == "thread_changed"
+    assert [r["status"] for r in done["action_results"]] == ["succeeded"]
+    assert not [f for f in done["read_findings"] if f["kind"] == "stale"]
+    (proposal,) = await _proposals(sessionmaker)
+    assert proposal.status == "executed"
+    assert llm.purposes == ["triage", "plan", "plan", "draft_reply", "plan"]
+    assert (await run_row(sessionmaker, seeded)).status == "done_with_actions"
+
+
+class WorkerCrash(BaseException):
+    """Stands in for the process dying: not an Exception, so nothing in the app catches it."""
+
+
+class CrashAfterSend:
+    """The mock mail provider, except that the process "dies" right after a send is accepted."""
+
+    def __init__(self, inner: MockMailProvider) -> None:
+        self.inner = inner
+        self.crash = True
+
+    async def get_thread(self, provider_thread_id: str, limit: int = 20) -> ThreadSnapshot:
+        return await self.inner.get_thread(provider_thread_id, limit)
+
+    async def send_reply(self, req: OutgoingReply, operation_id: str) -> ProviderResult:
+        result = await self.inner.send_reply(req, operation_id)
+        if self.crash:
+            raise WorkerCrash
+        return result
+
+    async def find_sent(self, operation_id: str) -> ProviderResult | None:
+        return await self.inner.find_sent(operation_id)
+
+
+async def test_retry_after_crash_post_send_with_changed_thread(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: Session,
+    owner: Owner,
+    mail: MockMailProvider,
+) -> None:
+    """The send went out, the worker died before recording it, then the thread changed.
+
+    The retry must reconcile the sent reply, not call it stale and draft another one.
+    """
+    crashing = CrashAfterSend(mail)
+    llm = CountingLLM(ScriptedLLMClient(_reply_script(seeded.provider_message_id)))
+    deps = make_deps(llm=llm, mail_provider=crashing)
+    paused = await run_graph(graph, seeded.input, seeded, deps)
+    approve = await decide(sessionmaker, owner, paused, mail)
+
+    with pytest.raises(WorkerCrash):
+        await resume(graph, approve, seeded, deps)
+
+    assert await count(sessionmaker, MockOutbox) == 1
+    crashing.crash = False
+    await _add_followup(sessionmaker, seeded)
+    async with sessionmaker() as s:  # the dead worker's claim is past the in-flight grace
+        await s.execute(update(Action).values(updated_at=datetime.now(UTC) - IN_FLIGHT_GRACE * 2))
+        await s.commit()
+
+    done = await run_graph(graph, None, seeded, deps)
+
+    assert [r["status"] for r in done["action_results"]] == ["succeeded"]
+    assert not [f for f in done["read_findings"] if f["kind"] == "stale"]
+    assert await count(sessionmaker, MockOutbox) == 1
+    assert await count(sessionmaker, Action) == 1
+    (proposal,) = await _proposals(sessionmaker)
+    assert proposal.status == "executed"
+    assert llm.purposes == ["triage", "plan", "plan", "draft_reply", "plan"]
+    assert (await run_row(sessionmaker, seeded)).status == "done_with_actions"
+
+
+async def test_mark_stale_thread_reread_failure_blocks(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: Session,
+    owner: Owner,
+    mail: MockMailProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preflight sees the change, then the re-read in `mark_stale` times out."""
+    slow = SlowMail(mail)
+    deps = make_deps(_reply_script(seeded.provider_message_id), mail_provider=slow)
+    paused = await run_graph(graph, seeded.input, seeded, deps)
+    approve = await decide(sessionmaker, owner, paused, mail)
+    await _add_followup(sessionmaker, seeded)
+    monkeypatch.setattr(execute, "PREFLIGHT_TIMEOUT_SECONDS", 1.0)
+    slow.hang_after = 1  # preflight's read works, the next one hangs
+
+    done = await resume(graph, approve, seeded, deps)
+
+    assert done["preflight"] == {"result": "blocked", "reason": "preflight_unavailable"}
     (proposal,) = await _proposals(sessionmaker)
     assert proposal.status == "stale"
-    assert (await run_row(sessionmaker, seeded)).status == "done_no_action"
-
-
-class CountingLLM:
-    """Scripted outputs; keeps the purpose of every call."""
-
-    def __init__(self, inner: ScriptedLLMClient) -> None:
-        self.inner = inner
-        self.purposes: list[str] = []
-
-    async def structured(self, call: LLMCall[T]) -> LLMResult[T]:
-        self.purposes.append(call.purpose)
-        return await self.inner.structured(call)
+    run = await run_row(sessionmaker, seeded)
+    assert (run.status, run.error_code) == ("failed", "preflight_unavailable")
 
 
 async def test_outcome_unknown_needs_review(
@@ -573,25 +706,6 @@ async def test_outcome_unknown_needs_review(
     assert (run.status, run.error_code) == ("failed", "outcome_unknown")
 
 
-class SlowMail:
-    """The mock mail provider, except that `get_thread` hangs once `hang` is set."""
-
-    def __init__(self, inner: MockMailProvider) -> None:
-        self.inner = inner
-        self.hang = False
-
-    async def get_thread(self, provider_thread_id: str, limit: int = 20) -> ThreadSnapshot:
-        if self.hang:
-            await asyncio.sleep(5)
-        return await self.inner.get_thread(provider_thread_id, limit)
-
-    async def send_reply(self, req: OutgoingReply, operation_id: str) -> ProviderResult:
-        return await self.inner.send_reply(req, operation_id)
-
-    async def find_sent(self, operation_id: str) -> ProviderResult | None:
-        return await self.inner.find_sent(operation_id)
-
-
 async def test_preflight_provider_timeout_blocks(
     graph: Graph,
     make_deps: DepsFactory,
@@ -601,7 +715,7 @@ async def test_preflight_provider_timeout_blocks(
     mail: MockMailProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(execute, "PREFLIGHT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(execute, "PREFLIGHT_TIMEOUT_SECONDS", 1.0)
     slow = SlowMail(mail)
     deps = make_deps(_reply_script(seeded.provider_message_id), mail_provider=slow)
     paused = await run_graph(graph, seeded.input, seeded, deps)

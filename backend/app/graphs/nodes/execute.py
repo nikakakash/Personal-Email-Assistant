@@ -22,10 +22,20 @@ nodes use those, never the ids in the owner's resume value. The checks live in
 planning with a `stale:<n>` finding) and `blocked` to `finish`. The approved payload is never
 regenerated: a stale proposal needs a new draft and a new approval.
 
-`execute_action` first repeats the preflight checks (a retry may run long after preflight),
-routing a failed re-check exactly as preflight would. It then hands the approval to the
-deterministic `ActionExecutor`, which owns the idempotent action ledger; a re-run of this node
-(e.g. after a crash) only reconciles. Outcomes:
+`execute_action` may be a retry (after a crash or `ActionInFlight`) long after preflight ran,
+so it is *ledger first*:
+
+1. The approval checks always run again (outbound enabled, approval accepted, active revision;
+   an `executed` proposal is accepted, since the retry may follow a successful send).
+2. If an `actions` row already exists for the operation, in any status, the send has been
+   claimed or made. The context checks are skipped: a thread that changed after the send must
+   not turn a sent reply into a "stale" proposal. The executor then returns the stored result
+   or reconciles; it never writes twice.
+3. Only when no row exists does it repeat the context checks (TTL, thread version, slot) and
+   route a failed one exactly as preflight would.
+
+It then hands the approval to the deterministic `ActionExecutor`, which owns the idempotent
+action ledger. Outcomes:
 
 - `succeeded` / `failed_definite` → `plan_next_step` (the planner sees the result);
 - `outcome_unknown` → `finish` with `error_code="outcome_unknown"`: the provider may have
@@ -42,28 +52,28 @@ from that checkpoint and re-runs only the failed node; input `None` means "conti
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from langgraph.runtime import Runtime
-from sqlalchemy import update
+from sqlalchemy import exists, select, update
 
 from app.actions.decisions import ACCEPTING
-from app.actions.executor import ActionExecutor, ExecutionRefused
-from app.db.models import AppFlags, Approval, Proposal, ProposalRevision, ReviewItem
+from app.actions.executor import ActionExecutor, ExecutionRefused, operation_id_for
+from app.db.models import Action, AppFlags, Approval, Proposal, ProposalRevision, ReviewItem
 from app.graphs.deps import GraphDeps
 from app.graphs.nodes.reads import THREAD_MESSAGE_LIMIT, scheduling_preferences
 from app.graphs.state import EmailState
-from app.providers.interfaces import ProviderTimeout
+from app.providers.interfaces import ProviderTimeout, ThreadNotFound, ThreadSnapshot
 from app.scheduling.slots import Interval
 
 PROPOSAL_TTL = timedelta(hours=72)
 PREFLIGHT_TIMEOUT_SECONDS: float = 60
 
 _BLOCKED_STATUS = {"outbound_disabled": "paused", "approval_invalid": "failed"}
-
-
-_PROVIDER_ERRORS = (ProviderTimeout, KeyError, TimeoutError)  # asyncio.TimeoutError is TimeoutError
+# The only exceptions that mean "provider unavailable". asyncio.TimeoutError is TimeoutError.
+_PROVIDER_ERRORS = (ProviderTimeout, ThreadNotFound, TimeoutError)
 
 
 class _Unavailable(Exception):
@@ -99,15 +109,31 @@ def _uuid(value: Any) -> uuid.UUID | None:
         return None
 
 
-async def _approved_revision(
-    state: EmailState, deps: GraphDeps, approval_id: uuid.UUID | None
-) -> tuple[str, int, dict[str, Any], datetime] | str:
-    """(kind, revision, payload, created_at) of the approved active revision, or a reason."""
+@dataclass(frozen=True)
+class _Approved:
+    """The DB-verified approval and the revision it authorizes."""
+
+    approval_id: uuid.UUID
+    proposal_id: uuid.UUID
+    kind: str
+    revision: int
+    payload: dict[str, Any]
+    created_at: datetime
+
+    def ok(self) -> dict[str, Any]:
+        return {**_ok(), "approval_id": str(self.approval_id), "proposal_revision": self.revision}
+
+
+async def _check_approval(state: EmailState, deps: GraphDeps, approval_id: Any) -> _Approved | str:
+    """Outbound enabled and the approval valid for the active revision, or a blocking reason."""
+    if not deps.settings.outbound_execution_enabled:
+        return "outbound_disabled"
+    verified_id = _uuid(approval_id)
     async with deps.sessionmaker() as session:
         flags = await session.get(AppFlags, 1)
         if flags is not None and flags.outbound_paused:
             return "outbound_disabled"
-        approval = await session.get(Approval, approval_id) if approval_id else None
+        approval = await session.get(Approval, verified_id) if verified_id else None
         if approval is None or approval.decision not in ACCEPTING:
             return "approval_invalid"
         revision = await session.get_one(ProposalRevision, approval.proposal_revision_id)
@@ -118,59 +144,71 @@ async def _approved_revision(
             or proposal.status not in ("approved", "executed")
         ):
             return "approval_invalid"
-        return proposal.kind, revision.revision, dict(revision.payload), revision.created_at
+        return _Approved(
+            approval_id=approval.id,
+            proposal_id=proposal.id,
+            kind=proposal.kind,
+            revision=revision.revision,
+            payload=dict(revision.payload),
+            created_at=revision.created_at,
+        )
+
+
+async def _fresh_thread(state: EmailState, deps: GraphDeps) -> ThreadSnapshot:
+    thread_id = state["provider_thread_id"]  # read outside the try: a missing key is a bug
+    try:
+        return await asyncio.wait_for(
+            deps.mail.get_thread(thread_id, limit=THREAD_MESSAGE_LIMIT),
+            PREFLIGHT_TIMEOUT_SECONDS,
+        )
+    except _PROVIDER_ERRORS as exc:
+        raise _Unavailable from exc
 
 
 async def _slot_taken(state: EmailState, deps: GraphDeps, payload: dict[str, Any]) -> bool:
     buffer = timedelta(minutes=int(scheduling_preferences(state)["buffer_minutes"]))
-    start = datetime.fromisoformat(payload["start"]) - buffer
-    end = datetime.fromisoformat(payload["end"]) + buffer
+    window = Interval(
+        datetime.fromisoformat(payload["start"]) - buffer,
+        datetime.fromisoformat(payload["end"]) + buffer,
+    )
+    time_zone = payload["time_zone"]
     try:
         freebusy = await asyncio.wait_for(
-            deps.calendar.get_freebusy(Interval(start, end), payload["time_zone"]),
-            PREFLIGHT_TIMEOUT_SECONDS,
+            deps.calendar.get_freebusy(window, time_zone), PREFLIGHT_TIMEOUT_SECONDS
         )
     except _PROVIDER_ERRORS as exc:
         raise _Unavailable from exc
-    return any(start < b.end and end > b.start for b in freebusy.busy)
+    return any(window.start < b.end and window.end > b.start for b in freebusy.busy)
 
 
-async def _thread_version(state: EmailState, deps: GraphDeps) -> str:
-    try:
-        thread = await asyncio.wait_for(
-            deps.mail.get_thread(state["provider_thread_id"], limit=THREAD_MESSAGE_LIMIT),
-            PREFLIGHT_TIMEOUT_SECONDS,
-        )
-    except _PROVIDER_ERRORS as exc:
-        raise _Unavailable from exc
-    return thread.version
-
-
-async def verify_approval(state: EmailState, deps: GraphDeps, approval_id: Any) -> dict[str, Any]:
-    """The preflight checks, shared by `preflight` and `execute_action` (reads only).
-
-    Returns the state update: `preflight` (result and reason), plus the DB-verified
-    `approval_id` and `proposal_revision` when ok, or `error_code` / `status` when blocked.
-    Only provider failures (timeouts, unknown thread) become `preflight_unavailable`; any other
-    exception is a bug and propagates.
-    """
-    if not deps.settings.outbound_execution_enabled:
-        return _blocked("outbound_disabled")
-    verified_id = _uuid(approval_id)
-    approved = await _approved_revision(state, deps, verified_id)
-    if isinstance(approved, str):
-        return _blocked(approved)
-    kind, revision, payload, created_at = approved
-    if created_at < deps.now() - PROPOSAL_TTL:
+async def _check_context(
+    state: EmailState, deps: GraphDeps, approved: _Approved
+) -> dict[str, Any] | None:
+    """TTL, thread version and (meetings) slot; a stale/blocked update, or None if current."""
+    if approved.created_at < deps.now() - PROPOSAL_TTL:
         return _stale("expired")
     try:
-        if await _thread_version(state, deps) != state.get("source_version"):
+        if (await _fresh_thread(state, deps)).version != state.get("source_version"):
             return _stale("thread_changed")
-        if kind == "create_event" and await _slot_taken(state, deps, payload):
+        if approved.kind == "create_event" and await _slot_taken(state, deps, approved.payload):
             return _stale("slot_taken")
     except _Unavailable:  # never execute on unverified context
         return _blocked("preflight_unavailable")
-    return {**_ok(), "approval_id": str(verified_id), "proposal_revision": revision}
+    return None
+
+
+async def verify_approval(state: EmailState, deps: GraphDeps, approval_id: Any) -> dict[str, Any]:
+    """All preflight checks (reads only); returns the state update.
+
+    `preflight` (result and reason), plus the DB-verified `approval_id` and
+    `proposal_revision` when ok, or `error_code` / `status` when blocked. Only provider
+    failures (timeouts, unknown thread) become `preflight_unavailable`; any other exception is
+    a bug and propagates.
+    """
+    approved = await _check_approval(state, deps, approval_id)
+    if isinstance(approved, str):
+        return _blocked(approved)
+    return await _check_context(state, deps, approved) or approved.ok()
 
 
 async def preflight(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
@@ -189,37 +227,60 @@ def route_after_preflight(state: EmailState) -> Literal["execute_action", "mark_
     return "finish"
 
 
+def _has_action(proposal_id: uuid.UUID) -> Any:
+    """SQL `EXISTS`: some revision of this proposal has an action-ledger row."""
+    return exists(
+        select(Action.id)
+        .join(Approval, Action.approval_id == Approval.id)
+        .join(ProposalRevision, Approval.proposal_revision_id == ProposalRevision.id)
+        .where(ProposalRevision.proposal_id == proposal_id)
+    )
+
+
 async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
     """Retire the stale proposal and tell the planner why (a `stale:<n>` finding).
 
-    Both updates are compare-and-set, so a re-run changes nothing. If the thread changed, the
-    fresh snapshot is loaded first (no transaction is open during the provider call).
+    Both updates are compare-and-set, so a re-run changes nothing, and neither touches a
+    proposal that already has an action-ledger row (claimed or sent: it is not stale). If the
+    thread changed, the fresh snapshot is loaded first, with no transaction open; if that read
+    fails the run ends `blocked:preflight_unavailable` (the proposal is still retired).
     """
     deps = runtime.context
     reason = str((state.get("preflight") or {}).get("reason"))
     update_: dict[str, Any] = {}
     if reason == "thread_changed":
-        snapshot = await asyncio.wait_for(
-            deps.mail.get_thread(state["provider_thread_id"], limit=THREAD_MESSAGE_LIMIT),
-            PREFLIGHT_TIMEOUT_SECONDS,
-        )
-        update_ = {"thread": snapshot.model_dump(mode="json"), "source_version": snapshot.version}
+        try:
+            snapshot = await _fresh_thread(state, deps)
+            update_ = {
+                "thread": snapshot.model_dump(mode="json"),
+                "source_version": snapshot.version,
+            }
+        except _Unavailable:
+            update_ = _blocked("preflight_unavailable")
 
-    async with deps.sessionmaker() as session, session.begin():
-        proposal_id = _uuid(state.get("proposal_id"))
-        if proposal_id is not None:
+    proposal_id = _uuid(state.get("proposal_id"))
+    item_id = _uuid(state.get("review_item_id"))
+    if proposal_id is not None:
+        async with deps.sessionmaker() as session, session.begin():
             await session.execute(
                 update(Proposal)
-                .where(Proposal.id == proposal_id, Proposal.status == "approved")
+                .where(
+                    Proposal.id == proposal_id,
+                    Proposal.status == "approved",
+                    ~_has_action(proposal_id),
+                )
                 .values(status="stale")
             )
-        item_id = _uuid(state.get("review_item_id"))
-        if item_id is not None:
-            await session.execute(
-                update(ReviewItem)
-                .where(ReviewItem.id == item_id, ReviewItem.status != "stale")
-                .values(status="stale")
-            )
+            if item_id is not None:
+                await session.execute(
+                    update(ReviewItem)
+                    .where(
+                        ReviewItem.id == item_id,
+                        ReviewItem.status != "stale",
+                        ~_has_action(proposal_id),
+                    )
+                    .values(status="stale")
+                )
 
     n = 1 + sum(1 for f in state.get("read_findings") or [] if f.get("kind") == "stale")
     finding = {
@@ -228,33 +289,52 @@ async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str
         "reason": reason,
         "proposal_id": state.get("proposal_id"),
     }
+    if "preflight" in update_:  # blocked: keep the blocked result for routing
+        return {**update_, "read_findings": [finding]}
     return {**update_, "read_findings": [finding], "preflight": None}
 
 
+def route_after_mark_stale(state: EmailState) -> Literal["plan_next_step", "finish"]:
+    blocked = (state.get("preflight") or {}).get("result") == "blocked"
+    return "finish" if blocked else "plan_next_step"
+
+
+async def _ledger_row_exists(deps: GraphDeps, approved: _Approved) -> bool:
+    op = operation_id_for(approved.proposal_id, approved.revision)
+    async with deps.sessionmaker() as session:
+        found = await session.scalar(select(Action.id).where(Action.operation_id == op))
+    return found is not None
+
+
 async def execute_action(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
-    """Re-verify, then execute the approved revision through the action ledger.
+    """Execute the approved revision through the action ledger (ledger first on a retry).
 
     The ids come from state as `preflight` verified them against the DB, never from the
-    owner's resume value. The same checks run again first, because this node may be a retry
-    (after a crash or `ActionInFlight`) long after preflight ran.
+    owner's resume value, and are verified again here. See the module docstring for why the
+    context checks run only when no ledger row exists yet.
     """
     deps = runtime.context
-    approval_id = state.get("approval_id")
-    recheck = await verify_approval(state, deps, approval_id)
-    if recheck["preflight"]["result"] != "ok":
-        return recheck
+    approved = await _check_approval(state, deps, state.get("approval_id"))
+    if isinstance(approved, str):
+        return _blocked(approved)
+    if not await _ledger_row_exists(deps, approved):
+        problem = await _check_context(state, deps, approved)
+        if problem is not None:
+            return problem
+    recheck = approved.ok()
+
     executor = ActionExecutor(deps.sessionmaker, deps.mail, deps.calendar, deps.settings)
     try:
-        outcome = await executor.execute(uuid.UUID(recheck["approval_id"]))
+        outcome = await executor.execute(approved.approval_id)
     except ExecutionRefused as refused:
         update_: dict[str, Any] = {"error_code": refused.reason, "next_action": "error"}
         if refused.reason in ("outbound_disabled", "outbound_paused"):
             update_["status"] = "paused"
         return update_
     if outcome.status == "executing":
-        raise ActionInFlight(str(approval_id))
+        raise ActionInFlight(recheck["approval_id"])
 
-    proposal_id, revision = state.get("proposal_id"), recheck["proposal_revision"]
+    proposal_id, revision = state.get("proposal_id"), approved.revision
     result = {
         "proposal_id": proposal_id,
         "revision": revision,

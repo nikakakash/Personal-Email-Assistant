@@ -16,6 +16,11 @@ class ProviderTimeout(Exception):  # noqa: N818 - name fixed by the contract
     """The provider call timed out; the outcome of the operation is unknown."""
 
 
+class ThreadNotFound(KeyError):
+    """`get_thread` found no such thread. A KeyError subclass, so older `except KeyError`
+    callers keep working while new code can catch exactly this."""
+
+
 class NormalizedMessage(BaseModel):
     provider_message_id: str
     provider_thread_id: str

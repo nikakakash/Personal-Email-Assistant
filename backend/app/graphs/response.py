@@ -35,7 +35,7 @@ Flow:
     preflight ─┬(ok)→ execute_action ─→ plan_next_step  (succeeded, failed_definite)
                │                     ─→ finish  (outcome_unknown, refusal, blocked re-check)
                │                     ─→ mark_stale  (stale re-check)
-               ├(stale)→ mark_stale → plan_next_step
+               ├(stale)→ mark_stale → plan_next_step (finish if the thread re-read fails)
                └(blocked)→ finish
     finish → END
 
@@ -72,6 +72,7 @@ from app.graphs.nodes.execute import (
     mark_stale,
     preflight,
     route_after_execute,
+    route_after_mark_stale,
     route_after_preflight,
 )
 from app.graphs.nodes.finalize import finish, unknown_decision
@@ -171,7 +172,7 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
     g.add_conditional_edges(
         "preflight", route_after_preflight, ["execute_action", "mark_stale", "finish"]
     )
-    g.add_edge("mark_stale", "plan_next_step")
+    g.add_conditional_edges("mark_stale", route_after_mark_stale, ["plan_next_step", "finish"])
     g.add_conditional_edges(
         "execute_action", route_after_execute, ["plan_next_step", "mark_stale", "finish"]
     )

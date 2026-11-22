@@ -18,6 +18,7 @@ from app.providers.interfaces import (
     OutgoingReply,
     ProviderResult,
     ProviderTimeout,
+    ThreadNotFound,
     ThreadSnapshot,
 )
 
@@ -52,7 +53,7 @@ class MockMailProvider:
                 )
             ).scalar_one_or_none()
             if thread is None:
-                raise KeyError(provider_thread_id)
+                raise ThreadNotFound(provider_thread_id)
             rows = (
                 (
                     await session.execute(
