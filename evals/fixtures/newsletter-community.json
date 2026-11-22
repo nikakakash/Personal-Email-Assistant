@@ -1,0 +1,28 @@
+{
+  "id": "newsletter-community",
+  "thread": [
+    {
+      "provider_message_id": "newsletter-community-m1",
+      "provider_thread_id": "thr-newsletter-community",
+      "rfc_message_id": "<newsletter-community.1@mail.example.net>",
+      "sender": "noreply-list@community.example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "[dev-list] Proposal: new release cadence",
+      "body_text": "Hi all, I'd like to propose moving to a six week release cadence. Thoughts?",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {
+        "List-Id": "<dev-list.community.example.org>"
+      }
+    }
+  ],
+  "label": {
+    "classification": "ignore",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

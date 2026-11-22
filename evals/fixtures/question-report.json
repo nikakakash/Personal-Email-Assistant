@@ -1,0 +1,26 @@
+{
+  "id": "question-report",
+  "thread": [
+    {
+      "provider_message_id": "question-report-m1",
+      "provider_thread_id": "thr-question-report",
+      "rfc_message_id": "<question-report.1@mail.example.net>",
+      "sender": "tom.becker@work.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Quick question about the Q3 report",
+      "body_text": "Hi,\n\nDid you already send the Q3 numbers to finance? I can't find them in the shared folder.\n\nThanks,\nTom",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

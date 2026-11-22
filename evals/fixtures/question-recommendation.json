@@ -1,0 +1,26 @@
+{
+  "id": "question-recommendation",
+  "thread": [
+    {
+      "provider_message_id": "question-recommendation-m1",
+      "provider_thread_id": "thr-question-recommendation",
+      "rfc_message_id": "<question-recommendation.1@mail.example.net>",
+      "sender": "anna@friends.example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Dentist recommendation?",
+      "body_text": "Hey, you mentioned a good dentist last month. Could you send me the name and number?\n\nAnna",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

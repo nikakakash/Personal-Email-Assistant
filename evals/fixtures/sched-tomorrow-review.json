@@ -1,0 +1,26 @@
+{
+  "id": "sched-tomorrow-review",
+  "thread": [
+    {
+      "provider_message_id": "sched-tomorrow-review-m1",
+      "provider_thread_id": "thr-sched-tomorrow-review",
+      "rfc_message_id": "<sched-tomorrow-review.1@mail.example.net>",
+      "sender": "sara.ng@work.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Design review - 30 min",
+      "body_text": "Can we grab 30 minutes tomorrow afternoon to review the mockups? Any time after lunch works for me.\n\nSara",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

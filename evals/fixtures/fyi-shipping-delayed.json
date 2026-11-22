@@ -1,0 +1,26 @@
+{
+  "id": "fyi-shipping-delayed",
+  "thread": [
+    {
+      "provider_message_id": "fyi-shipping-delayed-m1",
+      "provider_thread_id": "thr-fyi-shipping-delayed",
+      "rfc_message_id": "<fyi-shipping-delayed.1@mail.example.net>",
+      "sender": "support@parcels.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Delivery delayed",
+      "body_text": "Your delivery has been delayed by one day because of weather. New estimate: Tuesday, 24 November.",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "notify",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

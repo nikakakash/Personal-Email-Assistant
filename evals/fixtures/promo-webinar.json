@@ -1,0 +1,26 @@
+{
+  "id": "promo-webinar",
+  "thread": [
+    {
+      "provider_message_id": "promo-webinar-m1",
+      "provider_thread_id": "thr-promo-webinar",
+      "rfc_message_id": "<promo-webinar.1@mail.example.net>",
+      "sender": "events@vendor.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Join our free webinar on cloud cost savings",
+      "body_text": "Register now for our webinar on 3 December. Spots are limited!",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "ignore",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

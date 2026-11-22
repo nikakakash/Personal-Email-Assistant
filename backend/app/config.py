@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 PLACEHOLDER = "replace-me"
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _BACKEND_DIR.parent
+DEFAULT_FIXTURES_DIR = _REPO_ROOT / "evals" / "fixtures"
 
 
 class Settings(BaseSettings):
@@ -41,6 +42,7 @@ class Settings(BaseSettings):
     max_agent_steps: int = 10
     daily_budget_usd: Decimal = Decimal("2.00")
     outbound_execution_enabled: bool = False
+    fixtures_dir: Path = DEFAULT_FIXTURES_DIR
     poll_interval_seconds: int = 60
     worker_lease_seconds: int = 60
 

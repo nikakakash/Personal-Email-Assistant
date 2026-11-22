@@ -1,0 +1,26 @@
+{
+  "id": "promo-software",
+  "thread": [
+    {
+      "provider_message_id": "promo-software-m1",
+      "provider_thread_id": "thr-promo-software",
+      "rfc_message_id": "<promo-software.1@mail.example.net>",
+      "sender": "marketing@saas.example.io",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Upgrade to Pro and save 30%",
+      "body_text": "Unlock all features with Pro. Offer ends Friday. Reply STOP to opt out.",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "ignore",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

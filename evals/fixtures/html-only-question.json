@@ -1,0 +1,26 @@
+{
+  "id": "html-only-question",
+  "thread": [
+    {
+      "provider_message_id": "html-only-question-m1",
+      "provider_thread_id": "thr-html-only-question",
+      "rfc_message_id": "<html-only-question.1@mail.example.net>",
+      "sender": "ines@design.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Feedback on the logo",
+      "body_text": null,
+      "body_html": "<html><body><p>Hi,</p><p>Could you give me your <b>feedback</b> on the new logo by Friday?</p><img src=\"https://tracker.example.com/pixel.gif\"><p>Thanks!<br>Ines</p></body></html>",
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

@@ -1,0 +1,28 @@
+{
+  "id": "auto-bounce",
+  "thread": [
+    {
+      "provider_message_id": "auto-bounce-m1",
+      "provider_thread_id": "thr-auto-bounce",
+      "rfc_message_id": "<auto-bounce.1@mail.example.net>",
+      "sender": "mailer-daemon@mail.example.net",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Undelivered Mail Returned to Sender",
+      "body_text": "This is the mail system. Your message could not be delivered to unknown@example.org: user unknown.",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {
+        "Auto-Submitted": "auto-generated"
+      }
+    }
+  ],
+  "label": {
+    "classification": "ignore",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

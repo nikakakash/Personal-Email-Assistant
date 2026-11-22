@@ -1,0 +1,26 @@
+{
+  "id": "question-lunch",
+  "thread": [
+    {
+      "provider_message_id": "question-lunch-m1",
+      "provider_thread_id": "thr-question-lunch",
+      "rfc_message_id": "<question-lunch.1@mail.example.net>",
+      "sender": "maria@friends.example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Lunch next week?",
+      "body_text": "Hi! Are you free for lunch sometime next week? I was thinking the new place near the station.\n\nMaria",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

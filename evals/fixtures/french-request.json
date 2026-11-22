@@ -1,0 +1,26 @@
+{
+  "id": "french-request",
+  "thread": [
+    {
+      "provider_message_id": "french-request-m1",
+      "provider_thread_id": "thr-french-request",
+      "rfc_message_id": "<french-request.1@mail.example.net>",
+      "sender": "claire@entreprise.example.fr",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Rendez-vous demain ?",
+      "body_text": "Bonjour,\n\nPourriez-vous me dire si vous etes disponible demain apres-midi pour un appel de 30 minutes ? Merci d'avance.\n\nCordialement,\nClaire Dubois",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

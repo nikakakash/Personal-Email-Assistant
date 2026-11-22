@@ -1,0 +1,26 @@
+{
+  "id": "fyi-shipping-delivered",
+  "thread": [
+    {
+      "provider_message_id": "fyi-shipping-delivered-m1",
+      "provider_thread_id": "thr-fyi-shipping-delivered",
+      "rfc_message_id": "<fyi-shipping-delivered.1@mail.example.net>",
+      "sender": "updates@courier.example.net",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Delivered: package from BookShop",
+      "body_text": "Your package was delivered today at 11:42 and left with the neighbour at number 4.",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "notify",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}
