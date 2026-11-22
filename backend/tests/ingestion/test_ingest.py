@@ -167,3 +167,47 @@ async def test_duplicate_does_not_mark_stale(session: AsyncSession) -> None:
     await session.refresh(item)
     assert item.status == "pending"
     assert await _count(session, Job) == 1
+
+
+async def test_owner_reply_marks_pending_proposal_stale(session: AsyncSession) -> None:
+    item, proposal = await _seed_pending_proposal(session, "m1", "t1")
+    res = await ingest_message(session, _msg("o1", sender="owner@example.com", thread="t1"), OWNER)
+    await session.commit()
+    assert res.status == "skipped_owner" and res.workflow_job_id is None
+    await session.refresh(item)
+    await session.refresh(proposal)
+    assert item.status == "stale" and proposal.status == "stale"
+    resumes = (await session.execute(select(Job).where(Job.kind == "resume_workflow"))).scalars()
+    assert [j.dedup_key for j in resumes] == [f"resume:superseded:{item.id}"]
+    starts = await session.execute(select(Job).where(Job.dedup_key.like("%o1:start_workflow")))
+    assert starts.scalars().all() == []
+
+
+async def test_auto_reply_does_not_mark_stale(session: AsyncSession) -> None:
+    item, proposal = await _seed_pending_proposal(session, "m1", "t1")
+    cases = [
+        _msg("a1", sender="mailer-daemon@example.com", thread="t1"),
+        _msg("a2", thread="t1", headers={"Auto-Submitted": "auto-replied"}),
+        _msg("a3", thread="t1", headers={"List-Id": "<l.example.com>"}),
+    ]
+    for m in cases:
+        assert (await ingest_message(session, m, OWNER)).status == "skipped_automated"
+    await session.commit()
+    await session.refresh(item)
+    await session.refresh(proposal)
+    assert item.status == "pending" and proposal.status == "awaiting_approval"
+    assert await _count(session, Job) == 1
+
+
+async def test_approved_proposal_is_not_made_stale(session: AsyncSession) -> None:
+    item, proposal = await _seed_pending_proposal(session, "m1", "t1")
+    proposal.status = "approved"
+    await session.commit()
+    res = await ingest_message(session, _msg("m2", thread="t1"), OWNER)
+    await session.commit()
+    assert res.status == "queued"
+    await session.refresh(item)
+    await session.refresh(proposal)
+    assert proposal.status == "approved" and item.status == "pending"
+    jobs = (await session.execute(select(Job).where(Job.kind == "resume_workflow"))).scalars()
+    assert jobs.all() == []

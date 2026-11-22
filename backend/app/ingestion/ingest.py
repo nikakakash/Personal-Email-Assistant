@@ -42,11 +42,14 @@ def _is_automated(msg: NormalizedMessage) -> bool:
 
 async def _mark_superseded(session: AsyncSession, provider_thread_id: str) -> None:
     for item in await repo.pending_proposal_items(session, provider_thread_id):
-        item.status = "stale"
         if item.proposal_id is not None:
-            await session.execute(
-                update(Proposal).where(Proposal.id == item.proposal_id).values(status="stale")
-            )
+            proposal = await session.get(Proposal, item.proposal_id, with_for_update=True)
+            # Only a proposal still awaiting approval can be superseded; never overwrite
+            # approved, executed or any other status.
+            if proposal is None or proposal.status != "awaiting_approval":
+                continue
+            proposal.status = "stale"
+        item.status = "stale"
         await enqueue(
             session,
             "resume_workflow",
@@ -90,6 +93,9 @@ async def ingest_message(
     )
 
     if is_owner_address(msg.sender, owner_identities):
+        # A manual reply from the owner (e.g. in Gmail) invalidates pending proposals,
+        # but never starts a workflow.
+        await _mark_superseded(session, msg.provider_thread_id)
         return IngestResult(status="skipped_owner")
     if _is_automated(msg):
         return IngestResult(status="skipped_automated")

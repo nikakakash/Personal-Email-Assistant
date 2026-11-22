@@ -79,7 +79,10 @@ async def thread_message_ids(session: AsyncSession, thread_id: object) -> list[s
 async def pending_proposal_items(
     session: AsyncSession, provider_thread_id: str
 ) -> list[ReviewItem]:
-    """Pending proposal review items whose workflow is on this provider thread."""
+    """Pending proposal review items on this provider thread, row-locked.
+
+    The lock serializes stale-marking with a concurrent approval of the same item.
+    """
     rows = await session.execute(
         select(ReviewItem)
         .join(WorkflowRun, WorkflowRun.id == ReviewItem.workflow_id)
@@ -89,5 +92,6 @@ async def pending_proposal_items(
             ReviewItem.status == "pending",
         )
         .order_by(ReviewItem.created_at)
+        .with_for_update(of=ReviewItem)
     )
     return list(rows.scalars())
