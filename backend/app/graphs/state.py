@@ -60,12 +60,15 @@ class EmailState(TypedDict, total=False):
     owner_inputs: Annotated[list[dict[str, Any]], operator.add]
 
     # Planning loop.
-    next_action: str
+    next_action: str | None  # None once a read tool has consumed it
     step_count: int
 
     # Drafting and validation.
     draft: dict[str, Any] | None
     draft_kind: str | None
+    # Problems found while turning model output into a payload (e.g. a DST-gap local time);
+    # validate_proposal reports them instead of validating a payload.
+    draft_errors: list[str] | None
     validation: dict[str, Any] | None
     validation_attempts: int
     preflight: dict[str, Any] | None

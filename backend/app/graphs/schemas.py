@@ -12,12 +12,12 @@ from zoneinfo import ZoneInfo
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-_EVIDENCE_RE = re.compile(r"^(message|availability|thread|owner_input):[A-Za-z0-9._:@-]+$")
+_EVIDENCE_RE = re.compile(r"(message|availability|thread|owner_input):[A-Za-z0-9._:@-]+")
 
 
 def _check_evidence(refs: list[str]) -> list[str]:
     for ref in refs:
-        if not _EVIDENCE_RE.match(ref):
+        if not _EVIDENCE_RE.fullmatch(ref):
             raise ValueError(
                 f"bad evidence ref {ref!r}: use message:<id>, availability:<key>, "
                 "thread:<id> or owner_input:<id>"

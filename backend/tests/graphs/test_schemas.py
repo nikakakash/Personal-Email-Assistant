@@ -53,6 +53,11 @@ def test_evidence_refs_format_enforced() -> None:
     ReplyDraft(to=["a@b.c"], cc=[], body_text="hi", evidence_refs=["message:m-1", "thread:t.2"])
 
 
+def test_evidence_ref_with_trailing_newline_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ReplyDraft(to=["a@b.c"], cc=[], body_text="hi", evidence_refs=["message:m1\n"])
+
+
 def test_extra_fields_forbidden() -> None:
     with pytest.raises(ValidationError):
         ReplyDraft(to=[], cc=[], body_text="x", evidence_refs=[], subject="no")  # type: ignore[call-arg]
