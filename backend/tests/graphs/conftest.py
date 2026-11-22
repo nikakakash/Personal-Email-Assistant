@@ -26,6 +26,7 @@ from app.graphs.parent import build_parent_graph
 from app.graphs.state import EmailState
 from app.llm.client import LLMClient, Purpose
 from app.llm.scripted import ScriptedLLMClient
+from app.providers.interfaces import MailProvider
 from app.providers.mock_calendar import MockCalendarProvider
 from app.providers.mock_mail import MockFaults, MockMailProvider
 
@@ -114,11 +115,12 @@ def make_deps(
         *,
         llm: LLMClient | None = None,
         outbound: bool = True,
+        mail_provider: MailProvider | None = None,
     ) -> GraphDeps:
         settings = Settings(_env_file=None, outbound_execution_enabled=outbound)  # type: ignore[call-arg]
         return GraphDeps(
             llm=llm or ScriptedLLMClient(scripts or {}),
-            mail=mail,
+            mail=mail_provider or mail,
             calendar=calendar,
             sessionmaker=sessionmaker,
             settings=settings,

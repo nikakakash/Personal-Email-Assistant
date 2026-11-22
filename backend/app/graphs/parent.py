@@ -81,6 +81,12 @@ def build_parent_graph(
     ]:
         g.add_node(name, traced(name, node))
     g.add_node("notification_interrupt", notification_interrupt)  # only interrupt(); no I/O
+    # The subgraph's final state is written back through the parent's channels, so reducer
+    # keys are applied again: the subgraph starts with the parent's `owner_inputs` and
+    # `action_results` and returns the whole list, which `operator.add` then appends to the
+    # parent's copy. That is harmless only while the parent's lists are still empty when
+    # `response` starts, so nodes before `response` must never write `owner_inputs` or
+    # `action_results` (`read_findings` merges by key and is safe).
     g.add_node("response", build_response_graph().compile())
 
     g.add_edge(START, "load_context")

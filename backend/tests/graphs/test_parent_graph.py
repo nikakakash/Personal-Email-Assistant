@@ -2,14 +2,22 @@
 
 import uuid
 
+from langgraph.runtime import Runtime
 from langgraph.types import Command
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import AuditEvent, Owner, PreferenceVersion, ReviewItem, WorkflowEvent
-from app.graphs.nodes.notify import notification_item_id
+from app.db.models import (
+    AuditEvent,
+    Owner,
+    PreferenceVersion,
+    ReviewItem,
+    WorkflowEvent,
+    WorkflowRun,
+)
+from app.graphs.nodes.notify import notification_item_id, persist_notification
 from app.graphs.parent import GRAPH_VERSION, graph_thread_id
-from app.llm.client import LLMCall, LLMRefusal, LLMResult, T
+from app.llm.client import BudgetExceeded, LLMCall, LLMMalformedOutput, LLMRefusal, LLMResult, T
 from tests.graphs.conftest import (
     DepsFactory,
     Graph,
@@ -149,9 +157,12 @@ async def test_interrupt_node_rerun_is_side_effect_free(
     assert await count(sessionmaker, AuditEvent, AuditEvent.event_type == "run_completed") == 1
 
 
-class RefusingLLM:
+class RaisingLLM:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
     async def structured(self, call: LLMCall[T]) -> LLMResult[T]:
-        raise LLMRefusal("cyber")
+        raise self.exc
 
 
 async def test_triage_refusal_goes_to_owner_review(
@@ -160,7 +171,9 @@ async def test_triage_refusal_goes_to_owner_review(
     seeded: SeededRun,
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    paused = await run_graph(graph, seeded.input, seeded, make_deps(llm=RefusingLLM()))
+    paused = await run_graph(
+        graph, seeded.input, seeded, make_deps(llm=RaisingLLM(LLMRefusal("cyber")))
+    )
 
     assert paused["__interrupt__"][0].value["type"] == "notification"
     assert paused["classification"] == "notify"
@@ -214,3 +227,47 @@ async def test_load_preferences_uses_newest_active_revision(
 
     assert done["preferences"] == {"writing": {"tone": "brief"}, "triage": {"vip": []}}
     assert done["preference_version"] == 2
+
+
+async def test_triage_malformed_output_goes_to_owner_review(
+    graph: Graph, make_deps: DepsFactory, seeded: SeededRun
+) -> None:
+    deps = make_deps(llm=RaisingLLM(LLMMalformedOutput("bad")))
+
+    paused = await run_graph(graph, seeded.input, seeded, deps)
+
+    assert paused["__interrupt__"][0].value["type"] == "notification"
+    assert paused["classification"] == "notify"
+    assert paused["decision_summary"].startswith("Needs review: ")
+
+
+async def test_triage_budget_exceeded_pauses(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    deps = make_deps(llm=RaisingLLM(BudgetExceeded("daily budget reached")))
+
+    done = await run_graph(graph, seeded.input, seeded, deps)
+
+    assert "__interrupt__" not in done
+    assert await count(sessionmaker, ReviewItem) == 0
+    run = await run_row(sessionmaker, seeded)
+    assert (run.status, run.error_code) == ("paused", "budget")
+
+
+async def test_persist_review_item_keeps_final_run_status(
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sessionmaker() as s:
+        run = await s.get_one(WorkflowRun, uuid.UUID(seeded.workflow_id))
+        run.status = "cancelled"
+        await s.commit()
+    state = {**seeded.input, "classification": "notify", "decision_summary": "FYI."}
+
+    await persist_notification(state, Runtime(context=make_deps()))  # type: ignore[arg-type]
+
+    assert (await run_row(sessionmaker, seeded)).status == "cancelled"

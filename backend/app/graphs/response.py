@@ -32,7 +32,9 @@ Flow:
     persist_proposal → approval_interrupt ─(route_after_review)─┬→ preflight
                                                                 ├→ record_feedback → plan
                                                                 └→ finish
-    preflight ─┬(ok)→ execute_action ─→ plan_next_step (or finish on refusal)
+    preflight ─┬(ok)→ execute_action ─→ plan_next_step  (succeeded, failed_definite)
+               │                     ─→ finish  (outcome_unknown, refusal, blocked re-check)
+               │                     ─→ mark_stale  (stale re-check)
                ├(stale)→ mark_stale → plan_next_step
                └(blocked)→ finish
     finish → END
@@ -170,7 +172,9 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
         "preflight", route_after_preflight, ["execute_action", "mark_stale", "finish"]
     )
     g.add_edge("mark_stale", "plan_next_step")
-    g.add_conditional_edges("execute_action", route_after_execute, ["plan_next_step", "finish"])
+    g.add_conditional_edges(
+        "execute_action", route_after_execute, ["plan_next_step", "mark_stale", "finish"]
+    )
 
     g.add_edge("unknown_decision", "finish")
     g.add_edge("finish", END)

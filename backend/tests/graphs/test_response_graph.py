@@ -1,11 +1,13 @@
 """Response subgraph, driven through the compiled parent graph: reads, drafts, interrupts,
 decisions, preflight and execution."""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from langgraph.runtime import Runtime
 from langgraph.types import Command
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,11 +25,15 @@ from app.db.models import (
     ReviewItem,
     WorkflowEvent,
 )
+from app.graphs.deps import GraphDeps
+from app.graphs.nodes import execute
 from app.graphs.nodes.ask import question_item_id
 from app.graphs.nodes.execute import PROPOSAL_TTL, ActionInFlight
+from app.graphs.nodes.proposal import persist_proposal
 from app.llm.client import BudgetExceeded, LLMCall, LLMResult, T
 from app.llm.scripted import ScriptedLLMClient
-from app.providers.mock_mail import MockMailProvider
+from app.providers.interfaces import OutgoingReply, ProviderResult, ThreadSnapshot
+from app.providers.mock_mail import MockFaults, MockMailProvider
 from tests.graphs.conftest import (
     AVAILABILITY_KEY,
     NOW,
@@ -87,6 +93,25 @@ async def _event_payloads(sessionmaker: Session, event_type: str) -> list[dict[s
         return [dict(p) for p in rows.scalars()]
 
 
+async def _add_followup(sessionmaker: Session, seeded: SeededRun) -> None:
+    """A follow-up message arrives in the thread (its version changes)."""
+    async with sessionmaker() as s:
+        s.add(
+            EmailMessage(
+                thread_id=seeded.thread_row_id,
+                account_id="mock-account",
+                provider_message_id=f"{seeded.provider_message_id}-2",
+                sender="alice@example.com",
+                to_addrs=["owner@example.com"],
+                subject="Re: Meeting next week?",
+                body_text="Actually, Wednesday is better.",
+                received_at=NOW,
+                content_hash="h-followup",
+            )
+        )
+        await s.commit()
+
+
 async def test_respond_scheduling_full_path(
     graph: Graph,
     make_deps: DepsFactory,
@@ -123,6 +148,10 @@ async def test_respond_scheduling_full_path(
     assert (run.status, run.step_count, run.error_code) == ("done_with_actions", 3, None)
     (proposal,) = await _proposals(sessionmaker)
     assert proposal.status == "executed"
+    async with sessionmaker() as s:  # ids in state are the DB-verified ones
+        approval = await s.get_one(Approval, uuid.UUID(done["approval_id"]))
+        revision = await s.get_one(ProposalRevision, approval.proposal_revision_id)
+    assert (revision.proposal_id, revision.revision) == (proposal.id, done["proposal_revision"])
 
 
 async def test_question_interrupt_answer_resumes_same_thread(
@@ -240,21 +269,7 @@ async def test_preflight_stale_when_thread_changed(
     paused = await run_graph(graph, seeded.input, seeded, deps)
     inner = await subgraph_values(graph, seeded)
     approve = await decide(sessionmaker, owner, paused, mail)
-    async with sessionmaker() as s:  # a follow-up message arrives after the approval
-        s.add(
-            EmailMessage(
-                thread_id=seeded.thread_row_id,
-                account_id="mock-account",
-                provider_message_id=f"{seeded.provider_message_id}-2",
-                sender="alice@example.com",
-                to_addrs=["owner@example.com"],
-                subject="Re: Meeting next week?",
-                body_text="Actually, Wednesday is better.",
-                received_at=NOW,
-                content_hash="h-followup",
-            )
-        )
-        await s.commit()
+    await _add_followup(sessionmaker, seeded)
 
     done = await resume(graph, approve, seeded, deps)
 
@@ -427,21 +442,23 @@ async def test_validate_budget_stop_route(
     assert (run.status, run.error_code) == ("paused", "budget")
 
 
-async def test_execute_in_flight_raises(
+async def _raise_in_flight(
     graph: Graph,
-    make_deps: DepsFactory,
+    deps: GraphDeps,
     seeded: SeededRun,
     sessionmaker: Session,
     owner: Owner,
     mail: MockMailProvider,
-) -> None:
-    deps = make_deps(_reply_script(seeded.provider_message_id))
+) -> uuid.UUID:
+    """Approve, let another caller hold a fresh `executing` claim, resume: ActionInFlight."""
     paused = await run_graph(graph, seeded.input, seeded, deps)
     inner = await subgraph_values(graph, seeded)
     approve = await decide(sessionmaker, owner, paused, mail)
+    action_id = uuid.uuid4()
     async with sessionmaker() as s:  # another caller has just claimed the operation
         s.add(
             Action(
+                id=action_id,
                 operation_id=operation_id_for(uuid.UUID(inner["proposal_id"]), 1),
                 approval_id=uuid.UUID(approve["approval_id"]),
                 kind="send_reply",
@@ -459,6 +476,179 @@ async def test_execute_in_flight_raises(
     assert await count(sessionmaker, MockOutbox) == 0
     state = await graph.aget_state(seeded.config)  # type: ignore[arg-type]
     assert state.next == ("response",)  # the resume can be retried from here
+    return action_id
+
+
+async def test_execute_in_flight_raises(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: Session,
+    owner: Owner,
+    mail: MockMailProvider,
+) -> None:
+    """The worker's retry, `ainvoke(None, config)`, re-runs only `execute_action`."""
+    deps = make_deps(_reply_script(seeded.provider_message_id))
+    action_id = await _raise_in_flight(graph, deps, seeded, sessionmaker, owner, mail)
+    async with sessionmaker() as s:  # the other caller's send went through
+        await s.execute(
+            update(Action)
+            .where(Action.id == action_id)
+            .values(status="succeeded", provider_ref="sent-by-other-caller")
+        )
+        await s.commit()
+
+    done = await run_graph(graph, None, seeded, deps)
+
+    assert "__interrupt__" not in done
+    assert [(r["status"], r["provider_ref"]) for r in done["action_results"]] == [
+        ("succeeded", "sent-by-other-caller")
+    ]
+    assert await count(sessionmaker, Action) == 1
+    assert (await run_row(sessionmaker, seeded)).status == "done_with_actions"
+
+
+async def test_retry_after_in_flight_rechecks_context(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: Session,
+    owner: Owner,
+    mail: MockMailProvider,
+) -> None:
+    """A retry re-runs the preflight checks: a thread that changed meanwhile goes stale."""
+    deps = make_deps(_reply_script(seeded.provider_message_id))
+    await _raise_in_flight(graph, deps, seeded, sessionmaker, owner, mail)
+    await _add_followup(sessionmaker, seeded)
+
+    done = await run_graph(graph, None, seeded, deps)
+
+    assert done.get("action_results", []) == []
+    stale = next(f for f in done["read_findings"] if f["kind"] == "stale")
+    assert stale["reason"] == "thread_changed"
+    (proposal,) = await _proposals(sessionmaker)
+    assert proposal.status == "stale"
+    assert (await run_row(sessionmaker, seeded)).status == "done_no_action"
+
+
+class CountingLLM:
+    """Scripted outputs; keeps the purpose of every call."""
+
+    def __init__(self, inner: ScriptedLLMClient) -> None:
+        self.inner = inner
+        self.purposes: list[str] = []
+
+    async def structured(self, call: LLMCall[T]) -> LLMResult[T]:
+        self.purposes.append(call.purpose)
+        return await self.inner.structured(call)
+
+
+async def test_outcome_unknown_needs_review(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: Session,
+    owner: Owner,
+    mail: MockMailProvider,
+    faults: MockFaults,
+) -> None:
+    mid = seeded.provider_message_id
+    script = _reply_script(mid)
+    # If the planner ran again it would draft a second reply; it must not.
+    script[mid]["plan"][2:] = [plan_out("draft_reply")]
+    script[mid]["draft_reply"].append(reply_out(mid, body="Second try."))
+    llm = CountingLLM(ScriptedLLMClient(script))
+    deps = make_deps(llm=llm)
+    paused = await run_graph(graph, seeded.input, seeded, deps)
+    faults.send = "timeout_before_accept"
+
+    done = await resume(graph, await decide(sessionmaker, owner, paused, mail), seeded, deps)
+
+    assert "__interrupt__" not in done
+    assert [r["status"] for r in done["action_results"]] == ["outcome_unknown"]
+    assert llm.purposes == ["triage", "plan", "plan", "draft_reply"]
+    assert await count(sessionmaker, Action) == 1
+    assert await count(sessionmaker, Proposal) == 1
+    run = await run_row(sessionmaker, seeded)
+    assert (run.status, run.error_code) == ("failed", "outcome_unknown")
+
+
+class SlowMail:
+    """The mock mail provider, except that `get_thread` hangs once `hang` is set."""
+
+    def __init__(self, inner: MockMailProvider) -> None:
+        self.inner = inner
+        self.hang = False
+
+    async def get_thread(self, provider_thread_id: str, limit: int = 20) -> ThreadSnapshot:
+        if self.hang:
+            await asyncio.sleep(5)
+        return await self.inner.get_thread(provider_thread_id, limit)
+
+    async def send_reply(self, req: OutgoingReply, operation_id: str) -> ProviderResult:
+        return await self.inner.send_reply(req, operation_id)
+
+    async def find_sent(self, operation_id: str) -> ProviderResult | None:
+        return await self.inner.find_sent(operation_id)
+
+
+async def test_preflight_provider_timeout_blocks(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: Session,
+    owner: Owner,
+    mail: MockMailProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(execute, "PREFLIGHT_TIMEOUT_SECONDS", 0.05)
+    slow = SlowMail(mail)
+    deps = make_deps(_reply_script(seeded.provider_message_id), mail_provider=slow)
+    paused = await run_graph(graph, seeded.input, seeded, deps)
+    approve = await decide(sessionmaker, owner, paused, mail)
+    slow.hang = True
+
+    done = await resume(graph, approve, seeded, deps)
+
+    assert done["preflight"] == {"result": "blocked", "reason": "preflight_unavailable"}
+    assert await count(sessionmaker, Action) == 0
+    run = await run_row(sessionmaker, seeded)
+    assert (run.status, run.error_code) == ("failed", "preflight_unavailable")
+
+
+async def test_persist_proposal_replay_is_idempotent(
+    make_deps: DepsFactory, seeded: SeededRun, sessionmaker: Session, mail: MockMailProvider
+) -> None:
+    """A crash after the write but before the checkpoint re-runs the node with the same state."""
+    thread = await mail.get_thread(seeded.provider_thread_id)
+    rfc_id = thread.messages[0].rfc_message_id
+    assert rfc_id is not None
+    state: dict[str, Any] = {
+        **seeded.input,
+        "source_version": thread.version,
+        "preference_version": 0,
+        "step_count": 2,
+        "draft_kind": "send_reply",
+        "draft": {
+            "provider_thread_id": seeded.provider_thread_id,
+            "in_reply_to": rfc_id,
+            "references": [rfc_id],
+            "to": ["alice@example.com"],
+            "cc": [],
+            "subject": "Re: Meeting next week?",
+            "body_text": "Tuesday works.",
+            "evidence_refs": [f"message:{seeded.provider_message_id}"],
+        },
+    }
+    runtime = Runtime(context=make_deps())
+
+    first = await persist_proposal(state, runtime)  # type: ignore[arg-type]
+    second = await persist_proposal(state, runtime)  # type: ignore[arg-type]
+
+    assert first == second
+    assert await count(sessionmaker, Proposal) == 1
+    assert await count(sessionmaker, ReviewItem) == 1
+    assert len(await _event_payloads(sessionmaker, "approval_required")) == 1
 
 
 async def test_unknown_decision_finishes(

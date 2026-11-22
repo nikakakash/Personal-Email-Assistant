@@ -32,6 +32,7 @@ from sqlalchemy.dialects.postgresql import insert
 from app.db.models import ReviewItem, WorkflowRun
 from app.graphs.deps import GraphDeps
 from app.graphs.events import emit
+from app.graphs.nodes.finalize import FINAL_STATUSES
 from app.graphs.state import EmailState
 
 
@@ -42,7 +43,7 @@ async def persist_review_item(
     kind: Literal["notification", "question"],
     payload: dict[str, Any],
 ) -> None:
-    """Insert a pending review item once; set the run to `waiting_review`.
+    """Insert a pending review item once; set the run to `waiting_review` unless it is final.
 
     `approval_required` is emitted only by the call that actually inserted the row.
     """
@@ -63,7 +64,10 @@ async def persist_review_item(
         ).scalar_one_or_none()
         await session.execute(
             update(WorkflowRun)
-            .where(WorkflowRun.id == uuid.UUID(workflow_id))
+            .where(
+                WorkflowRun.id == uuid.UUID(workflow_id),
+                WorkflowRun.status.not_in(FINAL_STATUSES),
+            )
             .values(status="waiting_review", updated_at=datetime.now(UTC))
         )
         if inserted is not None:
