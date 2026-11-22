@@ -242,7 +242,14 @@ async def _run_actions(session: AsyncSession, workflow_id: uuid.UUID) -> list[Co
 
 
 async def _cancel(session: AsyncSession, workflow_id: uuid.UUID, request_id: str) -> CancelOutcome:
-    run = await session.get(WorkflowRun, workflow_id, with_for_update=True, populate_existing=True)
+    # FOR NO KEY UPDATE, not FOR UPDATE: it still serializes against other run UPDATEs and
+    # duplicate cancels, but it does not conflict with the FOR KEY SHARE lock that inserting a
+    # row referencing the run takes (AuditEvent, WorkflowEvent). `decide_proposal`, the answers
+    # and the executor's `_record` hold an item or proposal lock while inserting such rows;
+    # with FOR UPDATE here they would wait on us while we wait on their row: a deadlock.
+    run = await session.get(
+        WorkflowRun, workflow_id, with_for_update={"key_share": True}, populate_existing=True
+    )
     if run is None:
         raise ReviewNotFound(str(workflow_id))
     # Checked under the run lock: a concurrent duplicate waited for the first cancel to

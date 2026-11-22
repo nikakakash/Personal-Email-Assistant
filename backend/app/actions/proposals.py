@@ -58,8 +58,12 @@ async def create_proposal(
     the same order `cancel_workflow` locks in, so a concurrent cancel either committed before
     (and is seen here) or waits and then cancels what this call created.
     """
+    # FOR NO KEY UPDATE: serializes with cancel's run lock, but not with the FOR KEY SHARE
+    # lock that inserting rows referencing the run takes (see `cancel_workflow`).
     run_status = await session.scalar(
-        select(WorkflowRun.status).where(WorkflowRun.id == workflow_id).with_for_update()
+        select(WorkflowRun.status)
+        .where(WorkflowRun.id == workflow_id)
+        .with_for_update(key_share=True)
     )
     if run_status is None or run_status in FINAL_STATUSES:
         raise RunIsFinal(str(workflow_id))
