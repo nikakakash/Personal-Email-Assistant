@@ -79,3 +79,28 @@ def test_end_must_follow_start() -> None:
 def test_invalid_time_zone_rejected() -> None:
     with pytest.raises(ValueError):
         SchedulingPrefs("Nowhere/Land", time(9), time(17), frozenset({0}))
+
+
+def test_non_positive_duration_rejected() -> None:
+    for d in (timedelta(0), timedelta(minutes=-5)):
+        with pytest.raises(ValueError):
+            find_slots([], day_window(2026, 11, 19), d, PREFS)
+
+
+def test_naive_not_before_rejected() -> None:
+    with pytest.raises(ValueError):
+        find_slots(
+            [], day_window(2026, 11, 19), HALF_HOUR, PREFS, not_before=datetime(2026, 11, 19, 9)
+        )
+
+
+def test_busy_ending_exactly_at_buffer_edge_allowed() -> None:
+    # Candidate 10:30 minus 10 min buffer = 10:20; busy ending 10:20 does not overlap.
+    busy = [
+        Interval(
+            datetime(2026, 11, 19, 9, 0, tzinfo=PARIS),
+            datetime(2026, 11, 19, 10, 20, tzinfo=PARIS),
+        )
+    ]
+    slots = find_slots(busy, day_window(2026, 11, 19), HALF_HOUR, PREFS)
+    assert slots[0].start == datetime(2026, 11, 19, 10, 30, tzinfo=PARIS)

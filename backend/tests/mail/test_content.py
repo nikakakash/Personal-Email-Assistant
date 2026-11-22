@@ -44,3 +44,11 @@ def test_sanitize_strips_javascript_url_and_style() -> None:
     out = sanitize_html("<a href='javascript:x()' style='color:red'>l</a>")
     assert "javascript" not in out
     assert "style" not in out
+
+
+def test_section_blocks_do_not_glue_words() -> None:
+    assert model_text(None, "<section>A</section><section>B</section>") == "A B"
+
+
+def test_gt_inside_attribute_does_not_leak() -> None:
+    assert model_text(None, '<div title="a>b">Hi</div><p>there</p>') == "Hi there"

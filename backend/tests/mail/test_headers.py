@@ -17,3 +17,16 @@ def test_safe_header_returned() -> None:
 def test_reply_subject_idempotent() -> None:
     assert reply_subject("RE: Lunch") == "RE: Lunch"
     assert reply_subject("Lunch") == "Re: Lunch"
+
+
+@pytest.mark.parametrize(
+    "ch",
+    ["\x00", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029", "\x07", "\x7f"],
+)
+def test_header_control_and_line_break_chars_rejected(ch: str) -> None:
+    with pytest.raises(HeaderInjectionError):
+        assert_safe_header(f"Hi{ch}Bcc: x@y")
+
+
+def test_header_tab_allowed() -> None:
+    assert assert_safe_header("a\tb") == "a\tb"

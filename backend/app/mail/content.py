@@ -7,10 +7,13 @@ import nh3
 
 MAX_BODY_CHARS = 20_000
 
-_BLOCK_TAG = re.compile(
-    r"</?(?:p|br|div|li|ul|ol|tr|td|th|table|h[1-6]|blockquote|pre|hr)\b[^>]*>",
-    re.IGNORECASE,
-)
+_BLOCK_TAGS = {
+    "p", "br", "div", "li", "ul", "ol", "tr", "td", "th", "table", "h1", "h2", "h3",
+    "h4", "h5", "h6", "blockquote", "pre", "hr", "section", "article", "header",
+    "footer", "aside", "nav", "dl", "dt", "dd", "figure", "figcaption", "caption", "main",
+}
+# After the first nh3 pass the only tags left are attribute-free block tags.
+_BLOCK_TAG = re.compile(r"</?[a-z0-9]+\s*/?>", re.IGNORECASE)
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -19,8 +22,11 @@ def model_text(body_text: str | None, body_html: str | None) -> str:
     if body_text and body_text.strip():
         text = body_text.strip()
     elif body_html:
-        spaced = _BLOCK_TAG.sub(" ", body_html)
-        # nh3 drops <script>/<style> content by default; tags=set() strips all markup.
+        # nh3 parses the HTML properly (a ">" inside a quoted attribute is safe) and
+        # drops <script>/<style> content; keep only bare block tags, make them spaces,
+        # then strip whatever markup remains.
+        blocks_only = nh3.clean(body_html, tags=_BLOCK_TAGS, attributes={})
+        spaced = _BLOCK_TAG.sub(" ", blocks_only)
         stripped = html.unescape(nh3.clean(spaced, tags=set()))
         text = _WHITESPACE.sub(" ", stripped).strip()
     else:
