@@ -14,7 +14,9 @@ import { StatusStrip } from '@/components/StatusStrip'
 import { Button } from '@/components/ui/button'
 import { Toaster } from '@/components/ui/sonner'
 import { Login } from '@/pages/Login'
-import { ActivityPage, SettingsPage, WorkflowPage } from '@/pages/Placeholders'
+import { Activity } from '@/pages/Activity'
+import { Settings } from '@/pages/Settings'
+import { Workflow } from '@/pages/Workflow'
 import { Queue } from '@/pages/Queue'
 
 function Shell() {
@@ -83,9 +85,9 @@ export function AppRoutes() {
         <Route path="/login" element={<Login />} />
         <Route element={<Shell />}>
           <Route index element={<Queue />} />
-          <Route path="workflows/:id" element={<WorkflowPage />} />
-          <Route path="activity" element={<ActivityPage />} />
-          <Route path="settings" element={<SettingsPage />} />
+          <Route path="workflows/:id" element={<Workflow />} />
+          <Route path="activity" element={<Activity />} />
+          <Route path="settings" element={<Settings />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

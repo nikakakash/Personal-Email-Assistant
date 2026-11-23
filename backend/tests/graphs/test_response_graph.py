@@ -900,6 +900,60 @@ async def test_persist_proposal_replay_is_idempotent(
     assert len(await _event_payloads(sessionmaker, "approval_required")) == 1
 
 
+async def test_persist_proposal_records_cited_availability_check_time(
+    make_deps: DepsFactory, seeded: SeededRun, sessionmaker: Session
+) -> None:
+    """The review item carries when each cited availability finding was read (UI shows it)."""
+    cited = {
+        "key": "availability:2026-11-24:2026-11-24",
+        "kind": "availability",
+        "busy": [],
+        "candidate_slots": [],
+        "time_zone": "Europe/Paris",
+        "retrieved_at": "2026-11-23T09:00:00+00:00",
+    }
+    uncited = {**cited, "key": "availability:2026-11-25:2026-11-25"}
+    state: dict[str, Any] = {
+        **seeded.input,
+        "source_version": "sv",
+        "preference_version": 0,
+        "step_count": 3,
+        "read_findings": [cited, uncited],
+        "draft_kind": "create_event",
+        "draft": {
+            "calendar_id": "primary",
+            "title": "Sync",
+            "start": "2026-11-24T13:00:00+00:00",
+            "end": "2026-11-24T13:30:00+00:00",
+            "time_zone": "Europe/Paris",
+            "attendees": ["alice@example.com"],
+            "location": None,
+            "send_updates": "all",
+            "evidence_refs": [cited["key"], f"message:{seeded.provider_message_id}"],
+        },
+    }
+
+    await persist_proposal(state, Runtime(context=make_deps()))  # type: ignore[arg-type]
+
+    async with sessionmaker() as session:
+        item = (await session.execute(select(ReviewItem))).scalar_one()
+        proposal = (await session.execute(select(Proposal))).scalar_one()
+        revision = (await session.execute(select(ProposalRevision))).scalar_one()
+    assert item.payload == {
+        "proposal_kind": "create_event",
+        "revision": 1,
+        "availability": [
+            {
+                "key": cited["key"],
+                "time_zone": "Europe/Paris",
+                "retrieved_at": "2026-11-23T09:00:00+00:00",
+            }
+        ],
+    }
+    assert proposal.kind == "create_event"
+    assert "availability" not in revision.payload  # the hashed payload is unchanged
+
+
 async def test_unknown_decision_finishes(
     graph: Graph, make_deps: DepsFactory, seeded: SeededRun, sessionmaker: Session
 ) -> None:

@@ -46,13 +46,15 @@ async def create_proposal(
     preference_version: str | None,
     *,
     idempotency_key: str,
+    review_context: dict[str, Any] | None = None,
 ) -> tuple[Proposal, ProposalRevision]:
     """Create the proposal, revision 1, a pending review item and an `approval_required` event.
 
     Idempotent per `idempotency_key` (the graph passes `f"{workflow_id}:{step_count}"`): a
     re-run returns the existing proposal and its active revision and writes nothing; a key hit
     with a different `workflow_id` or `kind` raises ValueError. The hash
-    covers the payload only. Flushes; does not commit.
+    covers the payload only. `review_context` is extra display context merged into the review
+    item's payload (never the hashed proposal payload). Flushes; does not commit.
 
     Raises `RunIsFinal` (writing nothing) if the run is final. The run row is locked first,
     the same order `cancel_workflow` locks in, so a concurrent cancel either committed before
@@ -103,7 +105,7 @@ async def create_proposal(
         kind="proposal",
         status="pending",
         proposal_id=proposal_id,
-        payload={"proposal_kind": kind, "revision": 1},
+        payload={**(review_context or {}), "proposal_kind": kind, "revision": 1},
     )
     session.add(item)
     await session.flush()

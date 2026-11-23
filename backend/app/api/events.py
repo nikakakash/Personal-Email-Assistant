@@ -1,4 +1,5 @@
 """`GET /events`: server-sent events from the append-only `workflow_events` table.
+`GET /activity`: the same rows as a JSON page, newest first, for the Activity timeline.
 
 The cursor is the last event id the client has seen: `Last-Event-ID` (sent by the browser's
 `EventSource` when it reconnects) or else `?after=`. The stream first replays every row with
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
 from app.api.deps import OWNER_ONLY, SessionmakerDep, SettingsDep
+from app.api.pagination import DEFAULT_LIMIT, Limit, Page
 from app.api.views import EventOut
 from app.db.models import WorkflowEvent
 
@@ -88,4 +90,34 @@ async def events(
     cursor = _cursor(after, last_event_id)
     return EventSourceResponse(
         _stream(request, maker, cursor, workflow_id, once), ping=PING_SECONDS
+    )
+
+
+@router.get("/activity")
+async def activity(
+    maker: SessionmakerDep,
+    cursor: Annotated[str | None, Query(max_length=20)] = None,
+    limit: Limit = DEFAULT_LIMIT,
+) -> Page[EventOut]:
+    """Every workflow's events, newest first (the Activity timeline).
+
+    Event ids only grow, so the cursor is simply the id of the last row on the previous page;
+    the next page is the rows with a smaller id.
+    """
+    stmt = select(WorkflowEvent)
+    if cursor is not None:
+        if not cursor.isdigit():
+            raise HTTPException(status_code=422, detail="invalid_cursor")
+        stmt = stmt.where(WorkflowEvent.id < int(cursor))
+    async with maker() as session:
+        rows = list(
+            (
+                await session.execute(stmt.order_by(WorkflowEvent.id.desc()).limit(limit + 1))
+            ).scalars()
+        )
+    more = len(rows) > limit
+    rows = rows[:limit]
+    return Page[EventOut](
+        items=[EventOut.of(r) for r in rows],
+        next_cursor=str(rows[-1].id) if more else None,
     )

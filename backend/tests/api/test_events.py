@@ -72,3 +72,32 @@ async def test_sse_honours_last_event_id_and_workflow_filter(
 
 async def test_sse_requires_owner(anon: AsyncClient) -> None:
     assert (await anon.get("/api/v1/events", params={"once": "true"})).status_code == 401
+
+
+async def test_activity_lists_events_newest_first_with_cursor(
+    authed: AsyncClient, session: AsyncSession, workflow_factory: WorkflowFactory
+) -> None:
+    run = await workflow_factory()
+    rows = await _events(session, run, 3)
+
+    first = await authed.get("/api/v1/activity", params={"limit": 2})
+    assert first.status_code == 200
+    page = first.json()
+    assert [e["id"] for e in page["items"]] == [rows[2].id, rows[1].id]
+    assert page["items"][0]["workflow_id"] == str(run.id)
+    assert page["items"][0]["type"] == "node_started"
+    assert page["next_cursor"] == str(rows[1].id)
+
+    second = (
+        await authed.get("/api/v1/activity", params={"limit": 2, "cursor": page["next_cursor"]})
+    ).json()
+    assert [e["id"] for e in second["items"]] == [rows[0].id]
+    assert second["next_cursor"] is None
+
+
+async def test_activity_rejects_bad_cursor_and_requires_owner(
+    authed: AsyncClient, anon: AsyncClient
+) -> None:
+    bad = await authed.get("/api/v1/activity", params={"cursor": "abc"})
+    assert (bad.status_code, bad.json()) == (422, {"error": "invalid_cursor"})
+    assert (await anon.get("/api/v1/activity")).status_code == 401

@@ -1,7 +1,7 @@
 /** MSW server plus factories that build the backend's real response shapes. */
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import type { ReviewItemOut, WorkflowSummaryOut } from '@/api/schemas'
+import type { ReviewItemOut, WorkflowOut, WorkflowSummaryOut } from '@/api/schemas'
 
 export const review = (n: number, over: Partial<ReviewItemOut> = {}): ReviewItemOut => ({
   id: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
@@ -51,3 +51,112 @@ export const unauthenticated = http.get('/api/v1/auth/me', () =>
 )
 
 export const server = setupServer(...baseHandlers)
+
+// ---- Workflow detail (GET /workflows/{id}) ----
+
+export const WF_ID = '55555555-5555-4555-8555-000000000001'
+export const PROPOSAL_ID = '66666666-6666-4666-8666-000000000001'
+export const ITEM_ID = '77777777-7777-4777-8777-000000000001'
+
+export const replyPayload = {
+  provider_thread_id: 'thread-1',
+  in_reply_to: '<m1@example.com>',
+  references: ['<m1@example.com>'],
+  to: ['alice@example.com'],
+  cc: [],
+  subject: 'Re: Lunch?',
+  body_text: 'Tuesday works for me.',
+  evidence_refs: ['message:m1'],
+}
+
+export const eventPayload = {
+  calendar_id: 'primary',
+  title: 'Project sync',
+  start: '2026-11-24T13:00:00+00:00',
+  end: '2026-11-24T13:30:00+00:00',
+  time_zone: 'Europe/Paris',
+  attendees: ['alice@example.com', 'bob@example.com'],
+  location: 'Video call',
+  send_updates: 'all',
+  evidence_refs: ['availability:2026-11-24:2026-11-24'],
+}
+
+type Detail = WorkflowOut
+type ProposalKind = 'send_reply' | 'create_event'
+
+/** A run waiting on one pending proposal of `kind`; override any part with `over`. */
+export function workflowDetail(kind: ProposalKind = 'send_reply', over: Partial<Detail> = {}): Detail {
+  const payload = kind === 'send_reply' ? replyPayload : eventPayload
+  return {
+    run: {
+      id: WF_ID,
+      status: 'waiting_review',
+      error_code: null,
+      classification: 'needs_reply',
+      reason: 'Alice asks about lunch',
+      step_count: 3,
+      graph_version: 'wf1',
+      provider_thread_id: 'thread-1',
+      created_at: '2026-11-20T14:31:00+00:00',
+      updated_at: '2026-11-20T14:32:00+00:00',
+    },
+    thread: [
+      {
+        id: '88888888-8888-4888-8888-000000000001',
+        provider_message_id: 'm1',
+        sender: 'alice@example.com',
+        to: ['me@example.com'],
+        cc: [],
+        subject: 'Lunch?',
+        body_text: 'Are you free for lunch on Tuesday?',
+        body_html: null,
+        received_at: '2026-11-20T14:30:00+00:00',
+      },
+    ],
+    review_items: [
+      {
+        id: ITEM_ID,
+        kind: 'proposal',
+        status: 'pending',
+        interrupt_id: 'int-1',
+        proposal_id: PROPOSAL_ID,
+        payload:
+          kind === 'create_event'
+            ? {
+                proposal_kind: kind,
+                revision: 1,
+                availability: [
+                  {
+                    key: 'availability:2026-11-24:2026-11-24',
+                    time_zone: 'Europe/Paris',
+                    retrieved_at: '2026-11-23T09:00:00+00:00',
+                  },
+                ],
+              }
+            : { proposal_kind: kind, revision: 1 },
+        created_at: '2026-11-20T14:32:00+00:00',
+        resolved_at: null,
+      },
+    ],
+    proposals: [
+      {
+        id: PROPOSAL_ID,
+        kind,
+        status: 'awaiting_approval',
+        revision: 1,
+        payload,
+        payload_hash: 'hash-1',
+        author: 'model',
+        created_at: '2026-11-20T14:32:00+00:00',
+      },
+    ],
+    actions: [],
+    events: [],
+    ...over,
+  }
+}
+
+export const detailHandler = (detail: Detail) =>
+  http.get(`/api/v1/workflows/${detail.run.id}`, () => HttpResponse.json(detail))
+
+export const accepted = { status: 'accepted', approval_id: '99999999-9999-4999-8999-000000000001', job_id: null, revision: 1 }

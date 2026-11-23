@@ -56,6 +56,7 @@ async def persist_proposal(state: EmailState, runtime: Runtime[GraphDeps]) -> di
                 state.get("source_version"),
                 str(state.get("preference_version", 0)),
                 idempotency_key=f"{state['workflow_id']}:{state.get('step_count', 0)}",
+                review_context=_review_context(state, draft),
             )
             item_id = await _review_item_id(session, proposal.id)
     except RunIsFinal:
@@ -67,6 +68,17 @@ async def persist_proposal(state: EmailState, runtime: Runtime[GraphDeps]) -> di
         "approval_id": None,
         "preflight": None,
     }
+
+
+def _review_context(state: EmailState, draft: dict[str, Any]) -> dict[str, Any]:
+    """When each availability finding the draft cites was read, for the meeting review screen."""
+    cited = set(draft.get("evidence_refs") or [])
+    availability = [
+        {"key": f["key"], "time_zone": f.get("time_zone"), "retrieved_at": f.get("retrieved_at")}
+        for f in state.get("read_findings") or []
+        if f.get("kind") == "availability" and f.get("key") in cited
+    ]
+    return {"availability": availability} if availability else {}
 
 
 def route_after_persist_proposal(state: EmailState) -> Literal["approval_interrupt", "finish"]:

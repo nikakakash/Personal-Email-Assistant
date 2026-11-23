@@ -157,7 +157,109 @@ export const DecisionOutcome = z.object({
   status: z.literal('accepted'),
   approval_id: uuid,
   job_id: uuid.nullable(),
+  revision: z.number(),
 })
+
+/** actions.reviews.ReviewOutcome (question answer / notification decision) */
+export const ReviewOutcome = z.object({
+  status: z.literal('accepted'),
+  review_item_id: uuid,
+  job_id: uuid,
+})
+
+/** actions.reviews.CancelOutcome */
+export const CancelOutcome = z.object({
+  status: z.literal('accepted'),
+  workflow_id: uuid,
+  run_status: z.string(),
+  cancelled_review_items: z.array(uuid),
+  cancelled_proposals: z.array(uuid),
+  completed_actions: z.array(z.object({ proposal_id: uuid, action_id: uuid })).catch([]),
+  job_id: uuid.nullable(),
+})
+
+/** GET /activity: workflow events, newest first. */
+export const ActivityPage = page(EventOut)
+export type ActivityPage = z.infer<typeof ActivityPage>
+
+/** The cards the API projects onto review items (ReviewItemDetailOut.payload). */
+export const AvailabilityCheck = z.object({
+  key: z.string(),
+  time_zone: z.string().nullable(),
+  retrieved_at: z.string().nullable(),
+})
+export const ProposalItemPayload = z.object({
+  proposal_kind: z.string(),
+  revision: z.number(),
+  availability: z.array(AvailabilityCheck).optional(),
+})
+
+/** A send_reply proposal payload (graphs/nodes/draft.py). */
+export const ReplyPayload = z.object({
+  provider_thread_id: z.string(),
+  in_reply_to: z.string().nullable(),
+  references: z.array(z.string()),
+  to: z.array(z.string()),
+  cc: z.array(z.string()),
+  subject: z.string(),
+  body_text: z.string(),
+  evidence_refs: z.array(z.string()),
+})
+export type ReplyPayload = z.infer<typeof ReplyPayload>
+
+/** A create_event proposal payload (graphs/nodes/draft.py). Times are UTC ISO. */
+export const EventPayload = z.object({
+  calendar_id: z.string(),
+  title: z.string(),
+  start: z.string(),
+  end: z.string(),
+  time_zone: z.string(),
+  attendees: z.array(z.string()),
+  location: z.string().nullable(),
+  send_updates: z.enum(['all', 'none']),
+  evidence_refs: z.array(z.string()),
+})
+export type EventPayload = z.infer<typeof EventPayload>
+
+/** system.UsageOut. Decimals arrive as JSON strings. */
+const money = z.union([z.string(), z.number()]).transform(Number)
+export const UsageOut = z.object({
+  daily: z.array(
+    z.object({
+      date: z.string(),
+      model: z.string(),
+      calls: z.number(),
+      input_tokens: z.number(),
+      output_tokens: z.number(),
+      cache_read_tokens: z.number(),
+      cache_write_tokens: z.number(),
+      cost_usd: money,
+    }),
+  ),
+  today: z.object({ cost_usd: money, budget_usd: money, remaining_usd: money }),
+})
+export type UsageOut = z.infer<typeof UsageOut>
+
+/** preferences.PreferenceOut, keyed by namespace (absent = never set). */
+export const PreferenceOut = z.object({
+  namespace: z.string(),
+  revision: z.number(),
+  value: payload,
+  created_at: instant,
+})
+export type PreferenceOut = z.infer<typeof PreferenceOut>
+export const PreferencesOut = z.record(z.string(), PreferenceOut)
+
+/** dev.FixtureSummary / dev.FaultsOut / dev.InjectOut */
+export const FixtureSummary = z.object({
+  id: z.string(),
+  classification: z.string(),
+  message_count: z.number(),
+  subject: z.string(),
+})
+export const faultMode = z.enum(['ok', 'fail', 'timeout_before_accept', 'timeout_after_accept'])
+export const FaultsOut = z.object({ send: faultMode, calendar_create: faultMode })
+export const InjectOut = z.object({ fixture_id: z.string(), results: z.array(payload) })
 
 /** system.FlagsOut */
 export const FlagsOut = z.object({
