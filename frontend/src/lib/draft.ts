@@ -21,9 +21,11 @@ export function isDirty(p: ReplyPayload, e: ReplyEdits): boolean {
   return !same(parseAddresses(e.to), p.to) || !same(parseAddresses(e.cc), p.cc) || e.body_text !== p.body_text
 }
 
-/** The full payload with the owner's changes; the server copies the non-editable fields anyway. */
-export const editedPayload = (p: ReplyPayload, e: ReplyEdits): ReplyPayload => ({
-  ...p,
+/**
+ * The owner-editable fields only. The server copies everything else (subject, threading
+ * headers, evidence) from the reviewed revision and rejects any other field.
+ */
+export const editedPayload = (e: ReplyEdits) => ({
   to: parseAddresses(e.to),
   cc: parseAddresses(e.cc),
   body_text: e.body_text,

@@ -61,12 +61,13 @@ describe('DraftEditor', () => {
       proposal_revision: 1,
       payload_hash: 'hash-1',
       interrupt_id: 'int-1',
-      edited_payload: {
-        to: ['alice@example.com'],
-        cc: ['carol@example.com'],
-        subject: 'Re: Lunch?',
-        body_text: 'Tuesday at noon works.',
-      },
+    })
+    // Only the owner-editable fields: the server copies the rest from the reviewed revision
+    // and rejects any other field (field_not_editable).
+    expect(second.edited_payload).toEqual({
+      to: ['alice@example.com'],
+      cc: ['carol@example.com'],
+      body_text: 'Tuesday at noon works.',
     })
     expect(first.request_id).toMatch(UUID)
     expect(second.request_id).toMatch(UUID)

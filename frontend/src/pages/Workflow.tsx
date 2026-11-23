@@ -52,7 +52,7 @@ function ReplyReview({ workflowId, item, proposal }: { workflowId: string; item:
           interruptId: item.interrupt_id,
         }}
         dirty={dirty}
-        editedPayload={dirty ? editedPayload(parsed.data, edits) : null}
+        editedPayload={dirty ? editedPayload(edits) : null}
       />
     </div>
   )
