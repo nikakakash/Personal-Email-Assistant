@@ -1,0 +1,58 @@
+{
+  "id": "e2e-dismiss",
+  "thread": [
+    {
+      "provider_message_id": "e2e-dismiss-m1",
+      "provider_thread_id": "thr-e2e-dismiss",
+      "rfc_message_id": "<e2e-dismiss.1@mail.example.net>",
+      "sender": "rita@example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Quick favour",
+      "body_text": "Could you review my slides?",
+      "body_html": null,
+      "received_at": "2026-11-20T09:00:00+00:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond"
+  },
+  "script": {
+    "triage": [
+      {
+        "classification": "respond",
+        "urgency": "normal",
+        "reason": "A direct question that needs a reply.",
+        "evidence_refs": [
+          "message:e2e-dismiss-m1"
+        ],
+        "needs_clarification": false
+      }
+    ],
+    "plan": [
+      {
+        "action": "draft_reply",
+        "reason": "Answer the question."
+      },
+      {
+        "action": "finish",
+        "reason": "Nothing else to do."
+      }
+    ],
+    "draft_reply": [
+      {
+        "to": [
+          "rita@example.org"
+        ],
+        "cc": [],
+        "body_text": "Hi Rita,\n\nSure, send them over.\n\nBest",
+        "evidence_refs": [
+          "message:e2e-dismiss-m1"
+        ]
+      }
+    ]
+  }
+}

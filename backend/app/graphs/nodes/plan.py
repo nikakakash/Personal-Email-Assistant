@@ -65,6 +65,7 @@ async def plan_next_step(state: EmailState, runtime: Runtime[GraphDeps]) -> dict
         output_model=NextStep,
         workflow_id=UUID(state["workflow_id"]),
         script_key=state["provider_message_id"],
+        script_step=steps,
     )
     try:
         step = (await deps.llm.structured(call)).output

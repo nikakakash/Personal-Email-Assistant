@@ -1,0 +1,58 @@
+{
+  "id": "e2e-restart",
+  "thread": [
+    {
+      "provider_message_id": "e2e-restart-m1",
+      "provider_thread_id": "thr-e2e-restart",
+      "rfc_message_id": "<e2e-restart.1@mail.example.net>",
+      "sender": "noah@example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Dinner on Saturday?",
+      "body_text": "Are you coming to dinner on Saturday?",
+      "body_html": null,
+      "received_at": "2026-11-20T09:00:00+00:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond"
+  },
+  "script": {
+    "triage": [
+      {
+        "classification": "respond",
+        "urgency": "normal",
+        "reason": "A direct question that needs a reply.",
+        "evidence_refs": [
+          "message:e2e-restart-m1"
+        ],
+        "needs_clarification": false
+      }
+    ],
+    "plan": [
+      {
+        "action": "draft_reply",
+        "reason": "Answer the question."
+      },
+      {
+        "action": "finish",
+        "reason": "Nothing else to do."
+      }
+    ],
+    "draft_reply": [
+      {
+        "to": [
+          "noah@example.org"
+        ],
+        "cc": [],
+        "body_text": "Hi Noah,\n\nYes, I'll be there.\n\nBest",
+        "evidence_refs": [
+          "message:e2e-restart-m1"
+        ]
+      }
+    ]
+  }
+}

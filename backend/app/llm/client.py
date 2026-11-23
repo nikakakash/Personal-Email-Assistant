@@ -21,6 +21,8 @@ class LLMCall[T: BaseModel]:
     output_model: type[T]
     workflow_id: UUID | None = None
     script_key: str | None = None
+    # The planner's step number; the scripted client can pick outputs by it (restart-safe).
+    script_step: int | None = None
     max_tokens: int = 8000
 
 

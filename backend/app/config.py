@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     app_env: Literal["development", "test", "production"] = "development"
     app_base_url: str
+    # Where `python -m app api` listens; containers set API_HOST=0.0.0.0.
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
     database_url: str  # SQLAlchemy form: postgresql+psycopg://...
     checkpoint_database_url: str  # plain postgresql://... for psycopg / LangGraph
 

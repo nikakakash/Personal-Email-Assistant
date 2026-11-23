@@ -71,7 +71,8 @@ def db_url() -> str:
     """SQLAlchemy URL of `email_assistant_test`, created if missing and migrated to head.
 
     Connection details come from POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_HOST /
-    POSTGRES_PORT (defaults match compose.yaml). Skips when Postgres is unreachable.
+    POSTGRES_PORT (defaults match compose.yaml). Skips when Postgres is unreachable, except
+    under CI (env `CI` set), where it fails.
     """
     user = _pg_param("POSTGRES_USER", "app")
     password = _pg_param("POSTGRES_PASSWORD", "app")
@@ -94,7 +95,10 @@ def db_url() -> str:
             if not exists:
                 conn.execute(f'create database "{_TEST_DB_NAME}"')
     except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres unreachable at {host}:{port}; run `docker compose up -d db` ({exc})")
+        message = f"Postgres unreachable at {host}:{port}; run `docker compose up -d db` ({exc})"
+        if os.environ.get("CI"):
+            pytest.fail(message)  # in CI a missing database must not turn into green skips
+        pytest.skip(message)
 
     creds = f"{quote(user, safe='')}:{quote(password, safe='')}"
     url = f"postgresql+psycopg://{creds}@{host}:{port}/{_TEST_DB_NAME}"

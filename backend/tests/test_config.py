@@ -47,3 +47,16 @@ def test_owner_aliases_parse_comma_separated(
 ) -> None:
     monkeypatch.setenv("OWNER_ALIASES", "a@x.com, b@x.com")
     assert make().owner_aliases == ["a@x.com", "b@x.com"]
+
+
+def test_api_bind_defaults_to_loopback_and_is_configurable(
+    base_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.config import Settings
+
+    default = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert (default.api_host, default.api_port) == ("127.0.0.1", 8000)
+    monkeypatch.setenv("API_HOST", "0.0.0.0")
+    monkeypatch.setenv("API_PORT", "9000")
+    container = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert (container.api_host, container.api_port) == ("0.0.0.0", 9000)

@@ -1,0 +1,128 @@
+# CI: backend (lint, types, tests on Postgres 17.6), frontend (types, unit tests, build),
+# E2E (the compose E2E overlay plus Playwright) and a lockfile check.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: email_assistant
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d email_assistant"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5433"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.9"
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run ruff check . ../evals
+      - run: uv run ruff format --check . ../evals
+      - run: uv run mypy app
+      - run: uv run pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx tsc -b
+      - run: npm run lint
+      - run: npm run test -- --run
+      - run: npm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    env:
+      COMPOSE: docker compose -p email-assistant-e2e -f compose.yaml -f compose.e2e.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Start the E2E stack
+        # All services (naming some would leave the worker stopped), then wait for readiness.
+        run: |
+          $COMPOSE up -d --build
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8081/api/v1/health/ready && exit 0
+            sleep 2
+          done
+          echo "stack did not become ready" >&2
+          exit 1
+      - name: Install Playwright
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Journeys
+        working-directory: frontend
+        run: npx playwright test
+      - name: Stack logs
+        if: failure()
+        run: $COMPOSE logs --no-color --tail 300
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          retention-days: 7
+      - name: Stop the stack
+        if: always()
+        run: $COMPOSE down -v
+
+  lockfiles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.9"
+      - name: uv.lock matches pyproject.toml
+        working-directory: backend
+        run: uv lock --check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+      - name: package-lock.json matches package.json
+        working-directory: frontend
+        run: |
+          npm install --package-lock-only --ignore-scripts
+          git diff --exit-code package-lock.json

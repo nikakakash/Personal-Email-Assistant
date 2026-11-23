@@ -1,0 +1,67 @@
+{
+  "id": "e2e-sched",
+  "thread": [
+    {
+      "provider_message_id": "e2e-sched-m1",
+      "provider_thread_id": "thr-e2e-sched",
+      "rfc_message_id": "<e2e-sched.1@mail.example.net>",
+      "sender": "lena@example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Time for a quick call?",
+      "body_text": "Hi! Could we find 30 minutes for a call later this week? Lena",
+      "body_html": null,
+      "received_at": "2026-11-20T09:00:00+00:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond"
+  },
+  "script": {
+    "triage": [
+      {
+        "classification": "respond",
+        "urgency": "normal",
+        "reason": "A scheduling request.",
+        "evidence_refs": [
+          "message:e2e-sched-m1"
+        ],
+        "needs_clarification": false
+      }
+    ],
+    "plan": [
+      {
+        "action": "get_freebusy",
+        "reason": "Check the owner's calendar for that day.",
+        "freebusy": {
+          "start_date": "{{workday}}",
+          "end_date": "{{workday}}"
+        }
+      },
+      {
+        "action": "draft_reply",
+        "reason": "Offer the free slots."
+      },
+      {
+        "action": "finish",
+        "reason": "Nothing else to do."
+      }
+    ],
+    "draft_reply": [
+      {
+        "to": [
+          "lena@example.org"
+        ],
+        "cc": [],
+        "body_text": "Hi Lena,\n\nI'm free on {{workday}} at 09:00 UTC, 10:00 UTC or 11:00 UTC. Which works for you?\n\nBest",
+        "evidence_refs": [
+          "message:e2e-sched-m1",
+          "availability:{{workday}}:{{workday}}"
+        ]
+      }
+    ]
+  }
+}

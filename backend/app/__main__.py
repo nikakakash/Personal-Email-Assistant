@@ -54,7 +54,12 @@ def main(argv: list[str]) -> int:
     if command == "api":
         import uvicorn
 
-        uvicorn.run("app.main:create_app", factory=True, host="127.0.0.1", port=8000)
+        from app.config import get_settings
+
+        settings = get_settings()
+        uvicorn.run(
+            "app.main:create_app", factory=True, host=settings.api_host, port=settings.api_port
+        )
         return 0
     if command == "migrate":
         _migrate()
