@@ -65,6 +65,7 @@ from app.actions.decisions import ACCEPTING
 from app.actions.executor import ActionExecutor, ExecutionRefused, operation_id_for
 from app.db.models import Action, AppFlags, Approval, Proposal, ProposalRevision, ReviewItem
 from app.graphs.deps import GraphDeps
+from app.graphs.nodes.pause import is_pause
 from app.graphs.nodes.reads import THREAD_MESSAGE_LIMIT, scheduling_preferences
 from app.graphs.state import EmailState
 from app.providers.interfaces import ProviderTimeout, ThreadNotFound, ThreadSnapshot
@@ -73,7 +74,11 @@ from app.scheduling.slots import Interval
 PROPOSAL_TTL = timedelta(hours=72)
 PREFLIGHT_TIMEOUT_SECONDS: float = 60
 
-_BLOCKED_STATUS = {"outbound_disabled": "paused", "approval_invalid": "failed"}
+_BLOCKED_STATUS = {
+    "outbound_disabled": "paused",
+    "preflight_unavailable": "paused",  # a provider outage: retry once it is back
+    "approval_invalid": "failed",
+}
 # The only exceptions that mean "provider unavailable". asyncio.TimeoutError is TimeoutError.
 _PROVIDER_ERRORS = (ProviderTimeout, ThreadNotFound, TimeoutError)
 
@@ -233,12 +238,16 @@ async def preflight(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str,
     )
 
 
-def route_after_preflight(state: EmailState) -> Literal["execute_action", "mark_stale", "finish"]:
+def route_after_preflight(
+    state: EmailState,
+) -> Literal["execute_action", "mark_stale", "persist_pause", "finish"]:
     result = (state.get("preflight") or {}).get("result")
     if result == "ok":
         return "execute_action"
     if result == "stale":
         return "mark_stale"
+    if is_pause(state):
+        return "persist_pause"
     return "finish"
 
 
@@ -290,7 +299,8 @@ async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str
                 "source_version": snapshot.version,
             }
         except _Unavailable:
-            update_ = _blocked("preflight_unavailable")
+            # The proposal is retired below either way, so a retry re-plans, not re-checks.
+            update_ = {**_blocked("preflight_unavailable"), "resume_at": "plan_next_step"}
 
     item_id = _uuid(state.get("review_item_id"))
     if proposal_id is not None and op is not None:
@@ -329,11 +339,13 @@ async def mark_stale(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str
 
 def route_after_mark_stale(
     state: EmailState,
-) -> Literal["plan_next_step", "execute_action", "finish"]:
+) -> Literal["plan_next_step", "execute_action", "persist_pause", "finish"]:
     result = (state.get("preflight") or {}).get("result")
     if result == "ok":  # the proposal has a ledger row: let the executor reconcile
         return "execute_action"
-    return "finish" if result == "blocked" else "plan_next_step"
+    if result != "blocked":
+        return "plan_next_step"
+    return "persist_pause" if is_pause(state) else "finish"
 
 
 async def execute_action(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, Any]:
@@ -361,10 +373,10 @@ async def execute_action(state: EmailState, runtime: Runtime[GraphDeps]) -> dict
     try:
         outcome = await executor.execute(approved.approval_id)
     except ExecutionRefused as refused:
-        update_: dict[str, Any] = {"error_code": refused.reason, "next_action": "error"}
         if refused.reason in ("outbound_disabled", "outbound_paused"):
-            update_["status"] = "paused"
-        return update_
+            # The kill switch was set after preflight: pause, so Retry can re-check and send.
+            return {"error_code": "outbound_disabled", "status": "paused", "next_action": "error"}
+        return {"error_code": refused.reason, "next_action": "error"}
     if outcome.status == "executing":
         raise ActionInFlight(recheck["approval_id"])
 
@@ -390,11 +402,15 @@ async def execute_action(state: EmailState, runtime: Runtime[GraphDeps]) -> dict
     return update_
 
 
-def route_after_execute(state: EmailState) -> Literal["plan_next_step", "mark_stale", "finish"]:
+def route_after_execute(
+    state: EmailState,
+) -> Literal["plan_next_step", "mark_stale", "persist_pause", "finish"]:
     """Like preflight for a failed re-check; `finish` for refusals and unknown outcomes."""
     result = (state.get("preflight") or {}).get("result")
     if result == "stale":
         return "mark_stale"
+    if is_pause(state):
+        return "persist_pause"
     if result == "blocked" or state.get("next_action") == "error":
         return "finish"
     return "plan_next_step"

@@ -67,6 +67,11 @@ thread ID continues the run: the node **runs again from its first line**, and th
 - `question_interrupt` ([`nodes/ask.py`](../backend/app/graphs/nodes/ask.py)) waits for an answer.
 - `notification_interrupt` ([`nodes/notify.py`](../backend/app/graphs/nodes/notify.py)) waits
   for dismiss or respond.
+- `pause_interrupt` ([`nodes/pause.py`](../backend/app/graphs/nodes/pause.py)) waits for the
+  owner's Retry after a recoverable stop (budget, step limit, outbound off, provider down).
+  `POST /workflows/{id}/retry` ([`app/actions/retry.py`](../backend/app/actions/retry.py))
+  queues a `retry_workflow` job that resumes it; a run that failed mid-step is continued with
+  `ainvoke(None)` instead.
 - The worker resumes with `Command(resume={interrupt_id: payload})`. Keying by interrupt ID
   means a resume can only answer the interrupt the owner actually saw
   ([`app/jobs/worker.py`](../backend/app/jobs/worker.py)).
@@ -81,6 +86,7 @@ before it and are idempotent by app-table keys:
 - `persist_proposal` (key `"{workflow_id}:{step_count}"`) → `approval_interrupt`
 - `persist_question` (a deterministic `uuid5` review-item ID) → `question_interrupt`
 - `persist_notification` → `notification_interrupt`
+- `persist_pause` (a compare-and-set on the run row) → `pause_interrupt`
 
 The approval itself is recorded by the API (`app/actions/decisions.py`) before the resume job
 exists, never inside the graph.

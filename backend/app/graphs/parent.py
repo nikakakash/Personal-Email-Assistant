@@ -58,6 +58,12 @@ from app.graphs.nodes.notify import (
     route_after_notification,
     route_after_persist_notification,
 )
+from app.graphs.nodes.pause import (
+    pause_interrupt,
+    persist_pause,
+    route_after_parent_pause,
+    route_after_persist_pause,
+)
 from app.graphs.nodes.triage import record_triage, route_after_triage, triage
 from app.graphs.response import build_response_graph
 from app.graphs.state import EmailState
@@ -80,10 +86,12 @@ def build_parent_graph(
         ("record_triage", record_triage),
         ("persist_notification", persist_notification),
         ("unknown_decision", unknown_decision),
+        ("persist_pause", persist_pause),
         ("finalize", finalize),
     ]:
         g.add_node(name, traced(name, node))
     g.add_node("notification_interrupt", notification_interrupt)  # only interrupt(); no I/O
+    g.add_node("pause_interrupt", pause_interrupt)  # triage hit the budget: wait for Retry
     # The subgraph's final state is written back through the parent's channels, so reducer
     # keys are applied again: the subgraph starts with the parent's `owner_inputs` and
     # `action_results` and returns the whole list, which `operator.add` then appends to the
@@ -97,8 +105,16 @@ def build_parent_graph(
     g.add_edge("load_preferences", "triage")
     g.add_edge("triage", "record_triage")
     g.add_conditional_edges(
-        "record_triage", route_after_triage, ["finalize", "persist_notification", "response"]
+        "record_triage",
+        route_after_triage,
+        ["finalize", "persist_notification", "response", "persist_pause"],
     )
+    g.add_conditional_edges(
+        "persist_pause",
+        route_after_persist_pause,
+        {"pause_interrupt": "pause_interrupt", "end": "finalize"},
+    )
+    g.add_conditional_edges("pause_interrupt", route_after_parent_pause, ["triage", "finalize"])
     g.add_conditional_edges(
         "persist_notification",
         route_after_persist_notification,

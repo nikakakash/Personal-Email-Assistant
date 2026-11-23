@@ -53,7 +53,7 @@ async def plan_next_step(state: EmailState, runtime: Runtime[GraphDeps]) -> dict
     """Choose the next action. Checks the step budget before spending on a model call."""
     deps = runtime.context
     steps = state.get("step_count", 0)
-    if steps >= deps.settings.max_agent_steps:
+    if steps - state.get("step_base", 0) >= deps.settings.max_agent_steps:
         return {"next_action": "budget_stop", "status": "paused", "error_code": "step_budget"}
 
     prompt = load_prompt("plan")

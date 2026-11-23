@@ -252,12 +252,36 @@ async def test_triage_budget_exceeded_pauses(
 ) -> None:
     deps = make_deps(llm=RaisingLLM(BudgetExceeded("daily budget reached")))
 
-    done = await run_graph(graph, seeded.input, seeded, deps)
+    paused = await run_graph(graph, seeded.input, seeded, deps)
 
-    assert "__interrupt__" not in done
+    assert paused["__interrupt__"][0].value == {"type": "pause", "reason": "budget"}
     assert await count(sessionmaker, ReviewItem) == 0
     run = await run_row(sessionmaker, seeded)
     assert (run.status, run.error_code) == ("paused", "budget")
+    assert "run_paused" in await _events(sessionmaker, seeded)
+
+
+async def test_retry_after_triage_budget_triages_again(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    mid = seeded.provider_message_id
+    await run_graph(
+        graph, seeded.input, seeded, make_deps(llm=RaisingLLM(BudgetExceeded("daily budget")))
+    )
+
+    done = await resume(
+        graph,
+        {"decision": "retry"},
+        seeded,
+        make_deps({mid: {"triage": [triage_out("ignore", mid)]}}),
+    )
+
+    assert "__interrupt__" not in done
+    run = await run_row(sessionmaker, seeded)
+    assert (run.status, run.error_code, run.classification) == ("done_no_action", None, "ignore")
 
 
 async def test_persist_review_item_keeps_final_run_status(

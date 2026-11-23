@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import Select, and_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.actions.retry import is_retryable
 from app.api.pagination import Page, decode_cursor, encode_cursor
 from app.db.models import (
     Action,
@@ -48,6 +49,7 @@ class WorkflowSummaryOut(BaseModel):
     id: uuid.UUID
     status: str
     error_code: str | None
+    retryable: bool  # the UI offers Retry (see app/actions/retry.py)
     classification: str | None
     reason: str | None
     sender: str
@@ -61,6 +63,7 @@ class RunOut(BaseModel):
     id: uuid.UUID
     status: str
     error_code: str | None
+    retryable: bool
     classification: str | None
     reason: str | None
     step_count: int
@@ -201,6 +204,7 @@ async def list_workflows(
             id=run.id,
             status=run.status,
             error_code=run.error_code,
+            retryable=is_retryable(run.status, run.error_code),
             classification=run.classification,
             reason=run.triage_reason,
             sender=message.sender,
@@ -317,6 +321,7 @@ async def workflow_detail(session: AsyncSession, workflow_id: uuid.UUID) -> Work
             id=run.id,
             status=run.status,
             error_code=run.error_code,
+            retryable=is_retryable(run.status, run.error_code),
             classification=run.classification,
             reason=run.triage_reason,
             step_count=run.step_count,

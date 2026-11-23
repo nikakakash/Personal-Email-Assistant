@@ -42,6 +42,7 @@ export const WorkflowSummaryOut = z.object({
   id: uuid,
   status: z.string(),
   error_code: z.string().nullable(),
+  retryable: z.boolean().catch(false),
   classification: z.string().nullable(),
   reason: z.string().nullable(),
   sender: z.string(),
@@ -67,6 +68,7 @@ export const RunOut = z.object({
   id: uuid,
   status: z.string(),
   error_code: z.string().nullable(),
+  retryable: z.boolean().catch(false),
   classification: z.string().nullable(),
   reason: z.string().nullable(),
   step_count: z.number(),
@@ -164,6 +166,13 @@ export const DecisionOutcome = z.object({
 export const ReviewOutcome = z.object({
   status: z.literal('accepted'),
   review_item_id: uuid,
+  job_id: uuid,
+})
+
+/** actions.retry.RetryOutcome */
+export const RetryOutcome = z.object({
+  status: z.literal('accepted'),
+  workflow_id: uuid,
   job_id: uuid,
 })
 

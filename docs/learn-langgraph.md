@@ -83,7 +83,11 @@ flowchart TD
     LC --> LP[load_preferences]
     LP --> T[triage<br/><i>LLM</i>]
     T --> RT[record_triage]
-    RT -->|ignore / budget pause| F[finalize]
+    RT -->|ignore| F[finalize]
+    RT -->|budget used up| PSP[persist_pause]
+    PSP --> PZ{{pause_interrupt<br/><i>pause</i>}}
+    PZ -->|retry| T
+    PZ -->|cancel| F
     RT -->|notify| PN[persist_notification]
     RT -->|respond| R[[response subgraph]]
     PN -->|run already final| F
@@ -94,6 +98,7 @@ flowchart TD
     F --> E((END))
 
     style NI fill:#fde68a,stroke:#b45309
+    style PZ fill:#fde68a,stroke:#b45309
     style R fill:#dbeafe,stroke:#1d4ed8
     style T fill:#ede9fe,stroke:#6d28d9
 ```
@@ -124,7 +129,15 @@ flowchart TD
     PF -->|stale| MS[mark_stale]
     MS --> P
     X --> P
-    P -->|finish / budget / error| FIN[finish]
+    P -->|budget / step limit| PSP[persist_pause]
+    V -->|budget| PSP
+    PF -->|outbound off / provider down| PSP
+    X -->|outbound off| PSP
+    PSP --> PZ{{pause_interrupt<br/><i>pause</i>}}
+    PZ -->|retry after budget| P
+    PZ -->|retry after send block| PF
+    PZ -->|cancel| FIN
+    P -->|finish / error| FIN[finish]
     AI -->|reject| FIN
     PQ -->|run already final| FIN
     PP -->|run already final| FIN
@@ -132,6 +145,7 @@ flowchart TD
 
     style QI fill:#fde68a,stroke:#b45309
     style AI fill:#fde68a,stroke:#b45309
+    style PZ fill:#fde68a,stroke:#b45309
     style P fill:#ede9fe,stroke:#6d28d9
     style DR fill:#ede9fe,stroke:#6d28d9
     style DM fill:#ede9fe,stroke:#6d28d9
@@ -369,12 +383,20 @@ and anything unexpected becomes `error`. The model never chooses an arbitrary no
 
 **Loops need brakes.** The planner loop has three:
 
-1. **Step budget.** `plan_next_step` checks `step_count >= MAX_AGENT_STEPS` (10) *before*
-   spending money on a model call, and stops with `budget_stop`.
+1. **Step budget.** `plan_next_step` checks the steps taken against `MAX_AGENT_STEPS` (10)
+   *before* spending money on a model call, and stops with `budget_stop`.
 2. **Validation retry cap.** `validate_proposal` allows one retry (`MAX_VALIDATION_RETRIES = 1`);
    after that the run ends with `error`, not an infinite redraft.
 3. **Money budget.** The LLM client reserves the estimated cost against `DAILY_BUDGET_USD`
    before every call, and the run pauses when it would be exceeded.
+
+A brake that fires is a **pause, not an ending**. The run goes to `persist_pause` (records
+"paused, because …" on the run) and then waits at `pause_interrupt`, exactly like a review.
+The owner's **Retry** resumes it: after a budget stop the planner continues (with a fresh step
+allowance), and after a blocked send (outbound off, provider down) the run goes back to
+`preflight` with the *same* approval, so every pre-send check runs again and the model is not
+asked to redraft. A run that ended at `finish` could never be continued; a run waiting at an
+interrupt always can. See `backend/app/graphs/nodes/pause.py`.
 
 ---
 
@@ -820,7 +842,7 @@ instead. What does the action ledger do, and why is the payload hash check still
 | **Router** | pure function of state naming the next node | `route_after_*` in `nodes/` |
 | **Subgraph** | a compiled graph used as a node | `add_node("response", …)` in `parent.py` |
 | **Runtime context** | per-invocation dependencies, never checkpointed | `deps.py`, `make_deps` in `jobs/worker.py` |
-| **`interrupt(value)`** | pause the run and surface `value` | `ask.py`, `notify.py`, `proposal.py` |
+| **`interrupt(value)`** | pause the run and surface `value` | `ask.py`, `notify.py`, `proposal.py`, `pause.py` |
 | **`Command(resume=…)`** | continue a paused run with an answer | `jobs/worker.py` |
 | **Checkpointer** | saves state after each step | `AsyncPostgresSaver` in `jobs/worker.py` |
 | **`thread_id`** | identifies one run's checkpoints | `{account}:{message}:wf1` |

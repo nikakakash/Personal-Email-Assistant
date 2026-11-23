@@ -296,6 +296,7 @@ async def _cancel(session: AsyncSession, workflow_id: uuid.UUID, request_id: str
         item.resolved_at = now
     for proposal in cancelled_proposals:
         proposal.status = "cancelled_before_execution"
+    was_paused = run.status == "paused"
     if run.status not in FINAL_STATUSES:
         run.status = "cancelled"
         run.updated_at = now
@@ -307,6 +308,19 @@ async def _cancel(session: AsyncSession, workflow_id: uuid.UUID, request_id: str
         if interrupted is not None
         else None
     )
+    if job_id is None and was_paused:  # waiting at a pause, which has no review item
+        job = await enqueue(
+            session,
+            "resume_workflow",
+            f"resume:pause-cancel:{workflow_id}",
+            {
+                "workflow_id": str(workflow_id),
+                "interrupt_type": "pause",
+                "resume": {"decision": "cancelled"},
+            },
+            serial_key=run.provider_thread_id,
+        )
+        job_id = job.id
     outcome = CancelOutcome(
         workflow_id=workflow_id,
         run_status=run.status,

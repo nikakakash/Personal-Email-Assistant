@@ -65,6 +65,12 @@ class EmailState(TypedDict, total=False):
     # Planning loop.
     next_action: str | None  # None once a read tool has consumed it
     step_count: int
+    # A retry after `step_budget` grants a fresh allowance counted from here (see pause.py).
+    step_base: int
+    # Pauses (see pause.py): a pausing node may set `resume_at`; on Retry `pause_interrupt`
+    # stores where to continue in `retry_target`, which `route_after_pause` reads.
+    resume_at: str | None
+    retry_target: str | None
 
     # Drafting and validation.
     draft: dict[str, Any] | None

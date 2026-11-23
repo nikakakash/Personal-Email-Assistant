@@ -24,6 +24,7 @@ import { DraftEditor } from '@/components/DraftEditor'
 import { MeetingReview } from '@/components/MeetingReview'
 import { NotificationPanel } from '@/components/NotificationPanel'
 import { QuestionPanel } from '@/components/QuestionPanel'
+import { RetryButton } from '@/components/RetryButton'
 import { CancelButton, ReviewActions } from '@/components/ReviewActions'
 import { StatusBadge } from '@/components/StatusBadge'
 import { ThreadView } from '@/components/ThreadView'
@@ -164,6 +165,7 @@ export function Workflow() {
           {run.error_code && <span>Error: {run.error_code}</span>}
           {run.reason && <span>{run.reason}</span>}
         </div>
+        {run.retryable && <RetryButton workflowId={run.id} errorCode={run.error_code} />}
         {!final && !pendingProposal && <CancelButton workflowId={run.id} label="Cancel workflow" />}
       </header>
       <div className="grid gap-6 lg:grid-cols-2">

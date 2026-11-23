@@ -25,6 +25,7 @@ async def test_inject_enqueues_start_job(authed: AsyncClient, session: AsyncSess
     assert job.payload == {
         "account_id": "mock-account",
         "provider_message_id": "fyi-bank-statement-m1",
+        "automated": False,
     }
     assert str(job.id) == result["workflow_job_id"]
     assert await session.scalar(select(EmailMessage.subject)) == "Your monthly statement is ready"

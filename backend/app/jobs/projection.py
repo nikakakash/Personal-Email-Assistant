@@ -74,6 +74,10 @@ def pending_interrupts(snap: StateSnapshot) -> list[Interrupt]:
     return list(found.values())
 
 
+def _is_pause(interrupt: Interrupt) -> bool:
+    return isinstance(interrupt.value, dict) and interrupt.value.get("type") == "pause"
+
+
 def _review_item_id(interrupt: Interrupt) -> uuid.UUID | None:
     value: Any = interrupt.value
     raw = value.get("review_item_id") if isinstance(value, dict) else None
@@ -93,7 +97,8 @@ async def project_interrupts(
     Flushes but does not commit. Returns the pending interrupts.
     """
     interrupts = pending_interrupts(snap)
-    if interrupts:
+    # A pause (`pause_interrupt`) is not a review: the run stays `paused` until Retry.
+    if any(not _is_pause(i) for i in interrupts):
         # The run row first, then review items: the lock order `cancel_workflow` uses.
         await session.execute(
             update(WorkflowRun)

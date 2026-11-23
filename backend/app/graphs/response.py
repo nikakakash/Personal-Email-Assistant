@@ -79,6 +79,12 @@ from app.graphs.nodes.execute import (
     route_after_preflight,
 )
 from app.graphs.nodes.finalize import finish, unknown_decision
+from app.graphs.nodes.pause import (
+    pause_interrupt,
+    persist_pause,
+    route_after_pause,
+    route_after_persist_pause,
+)
 from app.graphs.nodes.plan import plan_next_step, route_after_plan
 from app.graphs.nodes.proposal import (
     approval_interrupt,
@@ -121,12 +127,14 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
         ("mark_stale", mark_stale),
         ("execute_action", execute_action),
         ("unknown_decision", unknown_decision),
+        ("persist_pause", persist_pause),
         ("finish", finish),
     ]:
         g.add_node(name, traced(name, node))
     # Interrupt nodes: only the interrupt() call, no events or other I/O.
     g.add_node("question_interrupt", question_interrupt)
     g.add_node("approval_interrupt", approval_interrupt)
+    g.add_node("pause_interrupt", pause_interrupt)
 
     g.add_edge(START, "plan_next_step")
     g.add_conditional_edges(
@@ -138,7 +146,7 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
             "draft_reply": "draft_reply",
             "draft_meeting": "draft_meeting",
             "finish": "finish",
-            "budget_stop": "finish",
+            "budget_stop": "persist_pause",
             "error": "finish",
         },
     )
@@ -163,7 +171,7 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
             "persist_proposal": "persist_proposal",
             "plan_next_step": "plan_next_step",
             "error": "finish",
-            "budget_stop": "finish",
+            "budget_stop": "persist_pause",
         },
     )
 
@@ -178,13 +186,29 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
     g.add_edge("record_feedback", "plan_next_step")
 
     g.add_conditional_edges(
-        "preflight", route_after_preflight, ["execute_action", "mark_stale", "finish"]
+        "preflight",
+        route_after_preflight,
+        ["execute_action", "mark_stale", "persist_pause", "finish"],
     )
     g.add_conditional_edges(
-        "mark_stale", route_after_mark_stale, ["plan_next_step", "execute_action", "finish"]
+        "mark_stale",
+        route_after_mark_stale,
+        ["plan_next_step", "execute_action", "persist_pause", "finish"],
     )
     g.add_conditional_edges(
-        "execute_action", route_after_execute, ["plan_next_step", "mark_stale", "finish"]
+        "execute_action",
+        route_after_execute,
+        ["plan_next_step", "mark_stale", "persist_pause", "finish"],
+    )
+
+    # Recoverable stops wait here for the owner's Retry (see app/graphs/nodes/pause.py).
+    g.add_conditional_edges(
+        "persist_pause",
+        route_after_persist_pause,
+        {"pause_interrupt": "pause_interrupt", "end": "finish"},
+    )
+    g.add_conditional_edges(
+        "pause_interrupt", route_after_pause, ["preflight", "plan_next_step", "finish"]
     )
 
     g.add_edge("unknown_decision", "finish")

@@ -57,6 +57,13 @@ and a pending review survives.
 - **No transaction stays open across a model or provider call.**
 - **Kill switches.** `OUTBOUND_EXECUTION_ENABLED=false` (the default) blocks every execution in
   preflight. The `outbound_paused` and `ingestion_paused` flags can be toggled from Settings.
+- **Recoverable stops pause, they do not end the run.** Budget or step limit reached, outbound
+  sending off, or a provider outage at preflight: the run waits at `pause_interrupt` and the
+  workflow page offers **Retry**, which re-runs every pre-send check before anything is sent.
+  A send whose outcome is unknown is never retried.
+- **Automated mail.** Bounces and auto-replies are skipped at ingestion. Other machine-sent
+  mail (no-reply senders, `Auto-Submitted`, `List-Id`) is triaged so the owner can be
+  notified, but code turns a `respond` classification into `notify`: it is never answered.
 
 ## Data flow of one email
 

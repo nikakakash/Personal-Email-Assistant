@@ -14,12 +14,14 @@ from typing import Any, cast
 import pytest
 from langgraph.types import Command
 from sqlalchemy import func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.__main__ import main
 from app.actions.decisions import DecisionConflict, DecisionIn, decide_proposal
 from app.actions.executor import operation_id_for
 from app.actions.proposals import active_revision
+from app.actions.retry import retry_workflow
 from app.db.models import (
     Action,
     AppFlags,
@@ -969,3 +971,102 @@ async def test_start_job_continues_after_crash(
     assert (start.state, start.attempts) == ("done", 2)
     assert (await _run(sessionmaker)).status == "waiting_review"
     await _decision(sessionmaker)  # the approval interrupt was projected onto its item
+
+
+# ------------------------------------------------------------------------------- retry
+
+
+async def _set_outbound_paused(sessionmaker: Session, paused: bool) -> None:
+    async with sessionmaker() as s:
+        await s.execute(
+            pg_insert(AppFlags)
+            .values(id=1, ingestion_paused=False, outbound_paused=paused)
+            .on_conflict_do_update(index_elements=[AppFlags.id], set_={"outbound_paused": paused})
+        )
+        await s.commit()
+
+
+def triage_ignore() -> dict[str, Any]:
+    return {
+        "classification": "ignore",
+        "urgency": "normal",
+        "reason": "Nothing to do.",
+        "evidence_refs": [f"message:{MID}"],
+        "needs_clarification": False,
+    }
+
+
+async def _retry(sessionmaker: Session, request_id: str) -> None:
+    run = await _run(sessionmaker)
+    async with sessionmaker() as s:
+        await retry_workflow(s, run.id, request_id=request_id)
+
+
+async def test_retry_after_outbound_resumed_sends_exactly_once(
+    sessionmaker: Session,
+    make_deps: DepsBuilder,
+    worker_settings: Any,
+    owner: Owner,
+    mail: MockMailProvider,
+) -> None:
+    """Approve while outbound is paused, un-pause, Retry: one send, no re-draft, no re-approval."""
+    url = worker_settings.checkpoint_database_url
+    owner_id = owner.id
+    await _set_outbound_paused(sessionmaker, True)
+    await _pause_for_approval(sessionmaker, make_deps, url)
+    await _approve(sessionmaker, owner_id, mail)
+
+    async with open_graph(url) as graph:
+        assert await _work(graph, make_deps(AFTER_APPROVAL))
+        run = await _run(sessionmaker)
+        assert (run.status, run.error_code) == ("paused", "outbound_disabled")  # not waiting_review
+        assert await _count(sessionmaker, MockOutbox) == 0
+
+        await _set_outbound_paused(sessionmaker, False)
+        await _retry(sessionmaker, "retry-1")
+        assert await _work(graph, make_deps(AFTER_APPROVAL))
+        assert not await _work(graph, make_deps())
+
+    assert await _count(sessionmaker, MockOutbox) == 1
+    assert await _count(sessionmaker, Proposal) == 1
+    run = await _run(sessionmaker)
+    assert (run.status, run.error_code) == ("done_with_actions", None)
+    (job,) = await _jobs(sessionmaker, "retry_workflow")
+    assert job.state == "done"
+
+
+async def test_retry_continues_a_failed_llm_transient_run(
+    sessionmaker: Session, make_deps: DepsBuilder, worker_settings: Any
+) -> None:
+    """The model was down: Retry continues from the last checkpoint (the step that failed)."""
+    await _ingest(sessionmaker)
+    async with open_graph(worker_settings.checkpoint_database_url) as graph:
+        assert await _work(graph, make_deps(llm=CountingLLM(LLMTransientError("529"))))
+        assert (await _run(sessionmaker)).status == "failed"
+
+        await _retry(sessionmaker, "retry-1")
+        assert await _work(graph, make_deps(BEFORE_APPROVAL))
+
+    run = await _run(sessionmaker)
+    assert (run.status, run.error_code) == ("waiting_review", None)
+    assert await _count(sessionmaker, ReviewItem, ReviewItem.kind == "proposal") == 1
+
+
+async def test_retry_with_nothing_to_continue_restores_the_run(
+    sessionmaker: Session, make_deps: DepsBuilder, worker_settings: Any
+) -> None:
+    """A failed run whose graph already ended: the job is a no-op and the run stays failed."""
+    await _ingest(sessionmaker)
+    async with open_graph(worker_settings.checkpoint_database_url) as graph:
+        assert await _work(graph, make_deps({MID: {"triage": [triage_ignore()]}}))
+        async with sessionmaker() as s:
+            await s.execute(
+                update(WorkflowRun).values(status="failed", error_code="internal_error")
+            )
+            await s.commit()
+
+        await _retry(sessionmaker, "retry-1")
+        assert await _work(graph, make_deps())
+
+    run = await _run(sessionmaker)
+    assert (run.status, run.error_code) == ("failed", "internal_error")

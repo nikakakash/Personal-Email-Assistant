@@ -1,4 +1,4 @@
-"""Workflow list (Failed / Completed tabs), workflow detail and cancel."""
+"""Workflow list (Failed / Completed tabs), workflow detail, cancel and retry."""
 
 import uuid
 from typing import Annotated, Literal
@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
+from app.actions.retry import RetryOutcome, retry_workflow
 from app.actions.reviews import CancelOutcome, cancel_workflow
 from app.api.deps import OWNER_ONLY, SessionDep, SessionmakerDep
 from app.api.pagination import DEFAULT_LIMIT, Limit, Page
@@ -53,3 +54,10 @@ async def workflow(workflow_id: uuid.UUID, session: SessionDep) -> WorkflowOut:
 async def cancel(workflow_id: uuid.UUID, body: CancelIn, maker: SessionmakerDep) -> CancelOutcome:
     async with maker() as session:
         return await cancel_workflow(session, workflow_id, request_id=body.request_id)
+
+
+@router.post("/{workflow_id}/retry", status_code=202)
+async def retry(workflow_id: uuid.UUID, body: CancelIn, maker: SessionmakerDep) -> RetryOutcome:
+    """Continue a paused or recoverably failed run (409 `not_retryable` otherwise)."""
+    async with maker() as session:
+        return await retry_workflow(session, workflow_id, request_id=body.request_id)

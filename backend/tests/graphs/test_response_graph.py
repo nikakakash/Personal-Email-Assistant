@@ -2,6 +2,7 @@
 decisions, preflight and execution."""
 
 import asyncio
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -381,16 +382,78 @@ async def test_outbound_disabled_blocks_execution(
     owner: Owner,
     mail: MockMailProvider,
 ) -> None:
-    deps = make_deps(_reply_script(seeded.provider_message_id), outbound=False)
+    """Blocked after approval: the run waits at a pause interrupt instead of ending."""
+    script = _reply_script(seeded.provider_message_id)
+    deps = make_deps(script, outbound=False)
     paused = await run_graph(graph, seeded.input, seeded, deps)
 
-    done = await resume(graph, await decide(sessionmaker, owner, paused, mail), seeded, deps)
+    blocked = await resume(graph, await decide(sessionmaker, owner, paused, mail), seeded, deps)
 
-    assert done["preflight"] == {"result": "blocked", "reason": "outbound_disabled"}
+    (pause,) = blocked["__interrupt__"]
+    assert pause.value == {"type": "pause", "reason": "outbound_disabled"}
+    inner = await subgraph_values(graph, seeded)
+    assert inner["preflight"] == {"result": "blocked", "reason": "outbound_disabled"}
     assert await count(sessionmaker, MockOutbox) == 0
     assert await count(sessionmaker, Action) == 0
     run = await run_row(sessionmaker, seeded)
     assert (run.status, run.error_code) == ("paused", "outbound_disabled")
+
+
+async def test_retry_after_outbound_enabled_sends_once(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: Session,
+    owner: Owner,
+    mail: MockMailProvider,
+) -> None:
+    """Retry goes back to preflight with the same approval: every check runs again."""
+    script = _reply_script(seeded.provider_message_id)
+    llm = ScriptedLLMClient(script)
+    paused = await run_graph(graph, seeded.input, seeded, make_deps(llm=llm, outbound=False))
+    approve = await decide(sessionmaker, owner, paused, mail)
+    await resume(graph, approve, seeded, make_deps(llm=llm, outbound=False))
+
+    # Still disabled: pauses again, nothing sent, the model is not called.
+    again = await resume(graph, {"decision": "retry"}, seeded, make_deps(llm=llm, outbound=False))
+    assert again["__interrupt__"][0].value == {"type": "pause", "reason": "outbound_disabled"}
+    assert await count(sessionmaker, MockOutbox) == 0
+
+    done = await resume(graph, {"decision": "retry"}, seeded, make_deps(llm=llm, outbound=True))
+
+    assert "__interrupt__" not in done
+    assert [r["status"] for r in done["action_results"]] == ["succeeded"]
+    assert await count(sessionmaker, MockOutbox) == 1
+    assert len(await _proposals(sessionmaker)) == 1  # no re-draft: the approved payload is sent
+    run = await run_row(sessionmaker, seeded)
+    assert (run.status, run.error_code) == ("done_with_actions", None)
+
+
+async def test_retry_after_step_budget_grants_new_steps(
+    graph: Graph, make_deps: DepsFactory, seeded: SeededRun, sessionmaker: Session
+) -> None:
+    mid = seeded.provider_message_id
+    script = {
+        mid: {
+            "triage": [triage_out("respond", mid)],
+            "plan": [freebusy_plan(), freebusy_plan(), plan_out("finish")],
+        }
+    }
+    deps = make_deps(script)
+    deps = dataclasses.replace(
+        deps, settings=deps.settings.model_copy(update={"max_agent_steps": 2})
+    )
+
+    paused = await run_graph(graph, seeded.input, seeded, deps)
+
+    assert paused["__interrupt__"][0].value == {"type": "pause", "reason": "step_budget"}
+    assert (await run_row(sessionmaker, seeded)).status == "paused"
+
+    done = await resume(graph, {"decision": "retry"}, seeded, deps)
+
+    assert "__interrupt__" not in done
+    run = await run_row(sessionmaker, seeded)
+    assert (run.status, run.error_code) == ("done_no_action", None)
 
 
 async def test_approval_for_inactive_revision_is_blocked(
@@ -437,13 +500,26 @@ async def test_validate_budget_stop_route(
 ) -> None:
     llm = BudgetOnDraft(ScriptedLLMClient(_reply_script(seeded.provider_message_id)))
 
-    done = await run_graph(graph, seeded.input, seeded, make_deps(llm=llm))
+    paused = await run_graph(graph, seeded.input, seeded, make_deps(llm=llm))
 
-    assert "__interrupt__" not in done
-    assert done["next_action"] == "budget_stop"
+    assert paused["__interrupt__"][0].value == {"type": "pause", "reason": "budget"}
+    assert (await subgraph_values(graph, seeded))["next_action"] == "budget_stop"
     assert await count(sessionmaker, Proposal) == 0
     run = await run_row(sessionmaker, seeded)
     assert (run.status, run.error_code) == ("paused", "budget")
+
+
+async def test_cancelled_while_paused_ends_cleanly(
+    graph: Graph, make_deps: DepsFactory, seeded: SeededRun, sessionmaker: Session
+) -> None:
+    llm = BudgetOnDraft(ScriptedLLMClient(_reply_script(seeded.provider_message_id)))
+    deps = make_deps(llm=llm)
+    await run_graph(graph, seeded.input, seeded, deps)
+
+    done = await resume(graph, {"decision": "cancelled"}, seeded, deps)
+
+    assert "__interrupt__" not in done
+    assert await count(sessionmaker, Proposal) == 0
 
 
 class CountingLLM:
@@ -802,13 +878,26 @@ async def test_mark_stale_thread_reread_failure_blocks(
     monkeypatch.setattr(execute, "PREFLIGHT_TIMEOUT_SECONDS", 1.0)
     slow.hang_after = 1  # preflight's read works, the next one hangs
 
-    done = await resume(graph, approve, seeded, deps)
+    blocked = await resume(graph, approve, seeded, deps)
 
-    assert done["preflight"] == {"result": "blocked", "reason": "preflight_unavailable"}
+    assert blocked["__interrupt__"][0].value == {
+        "type": "pause",
+        "reason": "preflight_unavailable",
+    }
+    inner = await subgraph_values(graph, seeded)
+    assert inner["preflight"] == {"result": "blocked", "reason": "preflight_unavailable"}
     (proposal,) = await _proposals(sessionmaker)
     assert proposal.status == "stale"
     run = await run_row(sessionmaker, seeded)
-    assert (run.status, run.error_code) == ("failed", "preflight_unavailable")
+    assert (run.status, run.error_code) == ("paused", "preflight_unavailable")
+
+    # The proposal is already retired, so Retry re-plans instead of re-checking it.
+    slow.hang, slow.hang_after = False, None
+    done = await resume(graph, {"decision": "retry"}, seeded, deps)
+
+    assert "__interrupt__" not in done
+    assert await count(sessionmaker, MockOutbox) == 0
+    assert (await run_row(sessionmaker, seeded)).status == "done_no_action"
 
 
 async def test_outcome_unknown_needs_review(
@@ -857,12 +946,22 @@ async def test_preflight_provider_timeout_blocks(
     approve = await decide(sessionmaker, owner, paused, mail)
     slow.hang = True
 
-    done = await resume(graph, approve, seeded, deps)
+    blocked = await resume(graph, approve, seeded, deps)
 
-    assert done["preflight"] == {"result": "blocked", "reason": "preflight_unavailable"}
+    assert blocked["__interrupt__"][0].value == {
+        "type": "pause",
+        "reason": "preflight_unavailable",
+    }
     assert await count(sessionmaker, Action) == 0
     run = await run_row(sessionmaker, seeded)
-    assert (run.status, run.error_code) == ("failed", "preflight_unavailable")
+    assert (run.status, run.error_code) == ("paused", "preflight_unavailable")
+
+    # The provider is back: Retry re-runs preflight with the same approval and sends once.
+    slow.hang = False
+    done = await resume(graph, {"decision": "retry"}, seeded, deps)
+
+    assert [r["status"] for r in done["action_results"]] == ["succeeded"]
+    assert await count(sessionmaker, MockOutbox) == 1
 
 
 async def test_persist_proposal_replay_is_idempotent(

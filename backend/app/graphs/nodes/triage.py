@@ -101,9 +101,9 @@ async def record_triage(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[
 
 def route_after_triage(
     state: EmailState,
-) -> Literal["finalize", "persist_notification", "response"]:
+) -> Literal["finalize", "persist_notification", "response", "persist_pause"]:
     if state.get("status") == "paused":
-        return "finalize"
+        return "persist_pause"  # the budget ran out: wait for the owner's Retry
     classification = state.get("classification")
     if classification == "respond":
         return "response"

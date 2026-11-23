@@ -32,6 +32,12 @@ How a workflow survives a restart (the concepts, in order):
 - **Final runs.** Once a run is final (cancelled, done, failed), only a `cancelled` or
   `superseded` resume is delivered, so the paused node ends the graph; any other resume (an
   answer or approval queued just before a cancel) is a no-op and the job completes.
+- **Retry.** A recoverable stop waits at `pause_interrupt` (`app/graphs/nodes/pause.py`).
+  The owner's Retry (`app/actions/retry.py`) enqueues a `retry_workflow` job: if a pause is
+  pending it is resumed with `{"decision": "retry"}`; a run that failed mid-step
+  (`llm_transient`, `internal_error`) has no pending interrupt but a non-empty `snap.next`, and
+  is continued with `ainvoke(None)`. If there is nothing to continue, the run gets back the
+  status it had before the click.
 - **Continuing after a crash.** If a worker dies mid-run, its job lease expires and another
   worker claims the job again. The checkpoint then has no pending interrupt but a non-empty
   `snap.next` (the step that was running). `ainvoke(None, config, ...)` means "continue from
@@ -230,6 +236,8 @@ async def _invoke(graph: Graph, deps: GraphDeps, target: _Target, value: Any) ->
 
 def _matching_interrupt(snap: StateSnapshot, payload: dict[str, Any]) -> Interrupt | None:
     """The pending interrupt this job answers (by id; or by review item, if the id was unknown)."""
+    if payload.get("interrupt_type") == "pause":  # a cancel of a paused run
+        return _pause_interrupt(snap)
     pending = pending_interrupts(snap)
     expected = payload.get("interrupt_id")
     if expected is not None:
@@ -283,6 +291,40 @@ async def _run_resume(
         await _invoke(graph, deps, target, None)
     else:
         log.info("resume job for %s: interrupt no longer pending; no-op", target.thread_id)
+
+
+def _pause_interrupt(snap: StateSnapshot) -> Interrupt | None:
+    return next(
+        (
+            i
+            for i in pending_interrupts(snap)
+            if isinstance(i.value, dict) and i.value.get("type") == "pause"
+        ),
+        None,
+    )
+
+
+async def _run_retry(
+    graph: Graph, deps: GraphDeps, target: _Target, payload: dict[str, Any]
+) -> None:
+    snap = await graph.aget_state(target.config, subgraphs=True)
+    pause = _pause_interrupt(snap)
+    if pause is not None:
+        await _invoke(graph, deps, target, Command(resume={pause.id: {"decision": "retry"}}))
+    elif not pending_interrupts(snap) and snap.next:
+        await _invoke(graph, deps, target, None)  # failed mid-step: run that step again
+    else:
+        log.info("retry job for %s: nothing to continue; status restored", target.thread_id)
+        async with deps.sessionmaker() as session, session.begin():
+            await session.execute(
+                update(WorkflowRun)
+                .where(WorkflowRun.id == target.workflow_id, WorkflowRun.status == "running")
+                .values(
+                    status=payload.get("previous_status", "failed"),
+                    error_code=payload.get("previous_error_code"),
+                    updated_at=datetime.now(UTC),
+                )
+            )
 
 
 async def _set_run_outcome(
@@ -366,6 +408,9 @@ async def _work(graph: Graph, deps: GraphDeps, job: Job) -> tuple[str, _Target |
         elif job.kind == "resume_workflow":
             target = await _resume_target(deps, job.payload)
             await _run_resume(graph, deps, target, job.payload)
+        elif job.kind == "retry_workflow":
+            target = await _resume_target(deps, job.payload)
+            await _run_retry(graph, deps, target, job.payload)
         else:
             raise ValueError(f"unknown job kind {job.kind!r}")
         return "done", target
