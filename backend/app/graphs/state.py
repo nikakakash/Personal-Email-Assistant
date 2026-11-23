@@ -43,6 +43,9 @@ class EmailState(TypedDict, total=False):
     provider_message_id: str
     provider_thread_id: str
     source_version: str
+    # Machine-sent mail (no-reply sender, Auto-Submitted, List-Id), set at ingestion: triage
+    # may notify about it but never routes it to a reply.
+    automated: bool
 
     # Context loaded from providers/stores. `thread` is ThreadSnapshot.model_dump(mode="json").
     thread: dict[str, Any]

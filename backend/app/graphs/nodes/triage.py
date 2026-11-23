@@ -69,10 +69,16 @@ async def triage(state: EmailState, runtime: Runtime[GraphDeps]) -> dict[str, An
         outcome["urgency"] = decision.urgency
         outcome["evidence_refs"] = list(decision.evidence_refs)
         return outcome
+    classification, reason = decision.classification, decision.reason
+    if classification == "respond" and state.get("automated"):
+        # Code, not the model, decides: machine-sent mail is never answered (reply loops,
+        # lists). The owner still hears about it.
+        classification = "notify"
+        reason = f"Automated sender; not replying. {reason}"
     return {
-        "classification": decision.classification,
+        "classification": classification,
         "urgency": decision.urgency,
-        "decision_summary": decision.reason,
+        "decision_summary": reason,
         "evidence_refs": list(decision.evidence_refs),
     }
 

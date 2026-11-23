@@ -72,21 +72,40 @@ async def test_ingest_skips_owner_sent_message(session: AsyncSession) -> None:
     assert await _count(session, EmailMessage) == 2  # stored, just never workflowed
 
 
-async def test_ingest_skips_auto_reply(session: AsyncSession) -> None:
+async def test_ingest_skips_bounces_and_auto_replies(session: AsyncSession) -> None:
+    """Only true loop risks are dropped before triage (spec: suppress reply loops, bounces)."""
     cases = [
         _msg("a", sender="mailer-daemon@example.com"),
-        _msg("b", sender="no-reply@shop.example.com"),
-        _msg("c", sender="noreply@shop.example.com"),
-        _msg("d", headers={"Auto-Submitted": "auto-replied"}),
-        _msg("e", headers={"List-Id": "<news.example.com>"}),
+        _msg("b", sender="Postmaster@example.com"),
+        _msg("c", headers={"Auto-Submitted": "auto-replied"}),
     ]
     for m in cases:
         res = await ingest_message(session, m, OWNER)
         assert res.status == "skipped_automated", m.provider_message_id
-    res = await ingest_message(session, _msg("f", headers={"Auto-Submitted": "no"}), OWNER)
-    assert res.status == "queued"
     await session.commit()
-    assert await _count(session, Job) == 1
+    assert await _count(session, Job) == 0
+
+
+async def test_ingest_queues_other_automated_mail_flagged(session: AsyncSession) -> None:
+    """No-reply senders, generated alerts and lists are still triaged, flagged as automated.
+
+    A security alert from no-reply@bank must reach the owner as a notification; the flag only
+    forbids the respond route (see triage).
+    """
+    cases = {
+        "b": _msg("b", sender="no-reply@bank.example.com"),
+        "c": _msg("c", sender="noreply@shop.example.com"),
+        "d": _msg("d", headers={"Auto-Submitted": "auto-generated"}),
+        "e": _msg("e", headers={"List-Id": "<news.example.com>"}),
+        "f": _msg("f", headers={"Auto-Submitted": "no"}),
+    }
+    for m in cases.values():
+        res = await ingest_message(session, m, OWNER)
+        assert res.status == "queued", m.provider_message_id
+    await session.commit()
+    jobs = (await session.execute(select(Job))).scalars().all()
+    flags = {j.payload["provider_message_id"]: j.payload.get("automated") for j in jobs}
+    assert flags == {"b": True, "c": True, "d": True, "e": True, "f": False}
 
 
 async def test_ingest_paused_stores_nothing(session: AsyncSession) -> None:
@@ -185,18 +204,20 @@ async def test_owner_reply_marks_pending_proposal_stale(session: AsyncSession) -
 
 async def test_auto_reply_does_not_mark_stale(session: AsyncSession) -> None:
     item, proposal = await _seed_pending_proposal(session, "m1", "t1")
+    jobs_before = await _count(session, Job)
     cases = [
         _msg("a1", sender="mailer-daemon@example.com", thread="t1"),
         _msg("a2", thread="t1", headers={"Auto-Submitted": "auto-replied"}),
         _msg("a3", thread="t1", headers={"List-Id": "<l.example.com>"}),
     ]
     for m in cases:
-        assert (await ingest_message(session, m, OWNER)).status == "skipped_automated"
+        await ingest_message(session, m, OWNER)
     await session.commit()
     await session.refresh(item)
     await session.refresh(proposal)
     assert item.status == "pending" and proposal.status == "awaiting_approval"
-    assert await _count(session, Job) == 1
+    # Only the list message starts a (flagged) workflow; nothing is superseded.
+    assert await _count(session, Job) == jobs_before + 1
 
 
 async def test_approved_proposal_is_not_made_stale(session: AsyncSession) -> None:

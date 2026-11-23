@@ -18,7 +18,11 @@ from app.jobs.queue import enqueue
 from app.mail.addresses import is_owner_address, normalize_address
 from app.providers.interfaces import NormalizedMessage
 
-_AUTOMATED_PREFIXES = ("mailer-daemon@", "no-reply@", "noreply@")
+# Loop risks, dropped before triage: bounces and auto-replies (spec: suppress reply loops and
+# bounces). Other automated mail (no-reply senders, generated alerts, lists) is still triaged so
+# the owner can be notified, but is flagged `automated` and never answered (see triage).
+_BOUNCE_PREFIXES = ("mailer-daemon@", "postmaster@")
+_NO_REPLY_PREFIXES = ("no-reply@", "noreply@", "donotreply@", "do-not-reply@")
 
 
 class IngestResult(BaseModel):
@@ -26,18 +30,34 @@ class IngestResult(BaseModel):
     workflow_job_id: UUID | None = None
 
 
-def _is_automated(msg: NormalizedMessage) -> bool:
+def _sender(msg: NormalizedMessage) -> str:
     try:
-        sender = normalize_address(msg.sender)
+        return normalize_address(msg.sender)
     except ValueError:
-        sender = msg.sender.strip().lower()
-    if sender.startswith(_AUTOMATED_PREFIXES):
-        return True
-    headers = {k.lower(): v for k, v in msg.headers.items()}
+        return msg.sender.strip().lower()
+
+
+def _headers(msg: NormalizedMessage) -> dict[str, str]:
+    return {k.lower(): v.strip().lower() for k, v in msg.headers.items()}
+
+
+def _is_loop_risk(msg: NormalizedMessage) -> bool:
+    """A bounce or an auto-reply: answering or even notifying would only feed a loop."""
+    return (
+        _sender(msg).startswith(_BOUNCE_PREFIXES)
+        or _headers(msg).get("auto-submitted") == "auto-replied"
+    )
+
+
+def _is_automated(msg: NormalizedMessage) -> bool:
+    """Machine-sent mail that must never get a reply (it may still deserve a notification)."""
+    headers = _headers(msg)
     auto = headers.get("auto-submitted")
-    if auto is not None and auto.strip().lower() != "no":
-        return True
-    return "list-id" in headers
+    return (
+        _sender(msg).startswith(_NO_REPLY_PREFIXES)
+        or (auto is not None and auto != "no")
+        or "list-id" in headers
+    )
 
 
 async def _mark_superseded(session: AsyncSession, provider_thread_id: str) -> None:
@@ -97,15 +117,21 @@ async def ingest_message(
         # but never starts a workflow.
         await _mark_superseded(session, msg.provider_thread_id)
         return IngestResult(status="skipped_owner")
-    if _is_automated(msg):
+    if _is_loop_risk(msg):
         return IngestResult(status="skipped_automated")
 
-    await _mark_superseded(session, msg.provider_thread_id)
+    automated = _is_automated(msg)
+    if not automated:  # a list post or an alert does not invalidate a pending reply
+        await _mark_superseded(session, msg.provider_thread_id)
     job = await enqueue(
         session,
         "start_workflow",
         f"{account_id}:{msg.provider_message_id}:start_workflow",
-        {"account_id": account_id, "provider_message_id": msg.provider_message_id},
+        {
+            "account_id": account_id,
+            "provider_message_id": msg.provider_message_id,
+            "automated": automated,
+        },
         serial_key=msg.provider_thread_id,
     )
     return IngestResult(status="queued", workflow_job_id=job.id)

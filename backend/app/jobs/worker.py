@@ -190,6 +190,7 @@ async def _start_target(deps: GraphDeps, payload: dict[str, Any]) -> _Target:
         "account_id": account_id,
         "provider_message_id": message_id,
         "provider_thread_id": provider_thread_id,
+        "automated": bool(payload.get("automated", False)),
     }
     return _Target(workflow_id, thread_id, initial)
 

@@ -274,3 +274,23 @@ async def test_persist_review_item_keeps_final_run_status(
     await persist_notification(state, Runtime(context=make_deps()))  # type: ignore[arg-type]
 
     assert (await run_row(sessionmaker, seeded)).status == "cancelled"
+
+
+async def test_automated_sender_is_never_answered(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Code, not the model, forbids replying to automated mail: respond becomes notify."""
+    mid = seeded.provider_message_id
+    deps = make_deps({mid: {"triage": [triage_out("respond", mid)]}})
+
+    paused = await run_graph(graph, {**seeded.input, "automated": True}, seeded, deps)
+
+    assert paused["__interrupt__"][0].value["type"] == "notification"
+    assert paused["classification"] == "notify"
+    assert paused["decision_summary"].startswith("Automated sender")
+    run = await run_row(sessionmaker, seeded)
+    assert run.classification == "notify"
+    assert "node_started:plan_next_step" not in await _events(sessionmaker, seeded)
