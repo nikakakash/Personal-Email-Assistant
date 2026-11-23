@@ -33,8 +33,10 @@ Then edit at least these:
 | `DAILY_BUDGET_USD` | the hard daily ceiling for model spend (default `2.00`) |
 | `OUTBOUND_EXECUTION_ENABLED` | leave `false` until you want approved mock sends to execute |
 
-Compose overrides `DATABASE_URL`, `CHECKPOINT_DATABASE_URL` and `APP_BASE_URL` for the
-containers. The values in `.env` are for running the backend directly on your machine.
+Compose overrides `DATABASE_URL` and `CHECKPOINT_DATABASE_URL` for the containers; the
+values in `.env` are for running the backend directly on your machine. Keep
+`APP_BASE_URL=http://localhost:8080`: it is the origin the browser uses in both setups, and
+sign-in is refused (`csrf_failed`) from any other origin.
 
 ### Getting an Anthropic API key
 
