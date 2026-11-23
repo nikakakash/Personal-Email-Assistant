@@ -47,6 +47,26 @@ async def test_freebusy_default_pattern(sessionmaker: async_sessionmaker[AsyncSe
     assert fb.retrieved_at.tzinfo is not None
 
 
+async def test_freebusy_busy_times_do_not_depend_on_the_requested_zone(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Like a real calendar: busy blocks live in the calendar's own zone; `time_zone` only
+    names the caller's display zone and must not move them (a meeting in another zone
+    would otherwise collide with phantom busy time at preflight)."""
+    provider = MockCalendarProvider(sessionmaker, {}, "Europe/Berlin", MockFaults())
+    window = Interval(_local(19, 0), _local(19, 23))
+    berlin = await provider.get_freebusy(window, "Europe/Berlin")
+    kolkata = await provider.get_freebusy(window, "Asia/Kolkata")
+    assert (
+        kolkata.busy
+        == berlin.busy
+        == [
+            Interval(_local(19, 12), _local(19, 13)),
+            Interval(_local(19, 15), _local(19, 16)),
+        ]
+    )
+
+
 async def test_freebusy_busy_by_date_overrides_default_for_that_date(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

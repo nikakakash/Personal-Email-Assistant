@@ -35,7 +35,9 @@ class MockCalendarProvider:
         self.faults = faults
 
     async def get_freebusy(self, window: Interval, time_zone: str | None = None) -> FreeBusy:
-        zone = ZoneInfo(time_zone or self._time_zone)
+        # The calendar's own zone places its busy pattern; `time_zone` is only the caller's
+        # display zone (as with Google free/busy, busy times are absolute).
+        zone = ZoneInfo(self._time_zone)
         busy: list[Interval] = []
         day = window.start.astimezone(zone).date()
         last = window.end.astimezone(zone).date()
