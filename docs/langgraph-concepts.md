@@ -3,6 +3,9 @@
 Each section explains one concept in a few lines and points to where this codebase uses it.
 Paths are relative to `backend/`. The module docstrings in `app/graphs/` go into more detail.
 
+New to LangGraph? Start with the full teaching guide, [`learn-langgraph.md`](learn-langgraph.md):
+diagrams, runnable toy examples, a step-by-step walkthrough of one email, and exercises.
+
 ## StateGraph and state
 
 A `StateGraph` is a set of nodes (async functions) connected by edges. All nodes share one
