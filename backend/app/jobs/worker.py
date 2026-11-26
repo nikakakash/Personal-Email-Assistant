@@ -104,6 +104,8 @@ from app.llm.factory import make_llm_client
 from app.prompts import PROMPT_VERSIONS
 from app.providers.mock_calendar import MockCalendarProvider
 from app.providers.mock_mail import MockFaults, MockMailProvider
+from app.retrieval.embeddings import EmbeddingTransientError, make_embeddings_client
+from app.retrieval.indexer import index_message
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +113,10 @@ Graph = CompiledStateGraph[EmailState, GraphDeps, EmailState, EmailState]
 DepsFactory = Callable[[Settings, async_sessionmaker[AsyncSession], MockFaults], GraphDeps]
 
 IN_FLIGHT_RETRY = timedelta(seconds=30)
+# index_message: a transient embedding failure retries soon (and uses up an attempt); an
+# exhausted embedding budget waits without using one.
+INDEX_TRANSIENT_RETRY = timedelta(minutes=2)
+INDEX_BUDGET_RETRY = timedelta(hours=1)
 
 
 def make_deps(
@@ -123,6 +129,7 @@ def make_deps(
         calendar=MockCalendarProvider(sessionmaker, None, "UTC", faults),
         sessionmaker=sessionmaker,
         settings=settings,
+        embeddings=make_embeddings_client(settings, sessionmaker) if settings.rag_enabled else None,
     )
 
 
@@ -398,8 +405,30 @@ async def fail_exhausted_run(session: AsyncSession, job: Job) -> None:
         log.exception("job %s (%s): could not fail the run of an exhausted job", job_id, kind)
 
 
+async def _work_index(deps: GraphDeps, job: Job) -> str:
+    """An `index_message` job: no workflow run is involved, so outcomes are job-only."""
+    if deps.embeddings is None:
+        log.info("job %s: RAG disabled; nothing to index", job.id)
+        return "done"
+    try:
+        message_id = uuid.UUID(str(job.payload["message_id"]))
+        await index_message(deps.sessionmaker, message_id, deps.embeddings)
+        return "done"
+    except EmbeddingTransientError:
+        log.warning("job %s: embedding provider unavailable; retrying later", job.id)
+        return "index_transient"
+    except BudgetExceeded:
+        log.warning("job %s: daily budget exhausted; indexing waits", job.id)
+        return "index_budget"
+    except Exception:
+        log.exception("job %s (index_message) failed", job.id)
+        return "internal_error"
+
+
 async def _work(graph: Graph, deps: GraphDeps, job: Job) -> tuple[str, _Target | None]:
     """Run the job's handler; return its outcome code and the run it acted on."""
+    if job.kind == "index_message":
+        return await _work_index(deps, job), None
     target: _Target | None = None
     try:
         if job.kind == "start_workflow":
@@ -491,6 +520,12 @@ async def _finish(
     async with deps.sessionmaker() as session, session.begin():
         if outcome == "in_flight":
             owned = await queue.reschedule(session, job.id, worker_id, IN_FLIGHT_RETRY)
+        elif outcome == "index_budget":
+            owned = await queue.reschedule(session, job.id, worker_id, INDEX_BUDGET_RETRY)
+        elif outcome == "index_transient":
+            owned = await queue.fail(
+                session, job.id, worker_id, outcome, retry_in=INDEX_TRANSIENT_RETRY
+            )
         elif outcome in ("done", "budget"):
             owned = await queue.complete(session, job.id, worker_id)
         else:

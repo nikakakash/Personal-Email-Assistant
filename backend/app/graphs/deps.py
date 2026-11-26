@@ -19,6 +19,7 @@ from typing import Any
 from app.config import Settings
 from app.llm.client import LLMClient
 from app.providers.interfaces import CalendarProvider, MailProvider
+from app.retrieval.embeddings import EmbeddingsClient
 
 
 def _utc_now() -> datetime:
@@ -34,3 +35,5 @@ class GraphDeps:
     settings: Settings
     # Injectable clock so tests can fix "now".
     now: Callable[[], datetime] = field(default=_utc_now)
+    # Retrieval over past email; None when RAG is disabled.
+    embeddings: EmbeddingsClient | None = None

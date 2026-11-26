@@ -85,3 +85,25 @@ async def test_dev_routes_absent_in_production(
         assert (
             await c.get("/api/v1/events", params={"once": "true"}, headers=headers)
         ).status_code == 422
+
+
+async def test_inject_queues_indexing_when_rag_enabled(
+    base_env: None, sessionmaker: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    settings = Settings(_env_file=None, rag_enabled=True)  # type: ignore[call-arg]
+    app = create_app(settings, sessionmaker=sessionmaker)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        login = await c.post("/api/v1/auth/login", json={"passphrase": "a-real-passphrase"})
+        c.headers["X-CSRF-Token"] = login.json()["csrf_token"]
+        r = await c.post("/api/v1/dev/inject", json={"fixture_id": "fyi-bank-statement"})
+        assert r.status_code == 200
+    kinds = set((await session.execute(select(Job.kind))).scalars())
+    assert kinds == {"start_workflow", "index_message"}
+
+
+async def test_inject_does_not_index_when_rag_disabled(
+    authed: AsyncClient, session: AsyncSession
+) -> None:
+    await authed.post("/api/v1/dev/inject", json={"fixture_id": "fyi-bank-statement"})
+    kinds = set((await session.execute(select(Job.kind))).scalars())
+    assert kinds == {"start_workflow"}

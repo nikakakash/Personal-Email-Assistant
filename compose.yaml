@@ -66,6 +66,8 @@ services:
     <<: *backend
     command: ["python", "-m", "app", "worker"]
     restart: unless-stopped
+    volumes:
+      - modelcache:/cache
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -84,3 +86,4 @@ services:
 
 volumes:
   pgdata:
+  modelcache:

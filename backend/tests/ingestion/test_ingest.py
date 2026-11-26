@@ -232,3 +232,48 @@ async def test_approved_proposal_is_not_made_stale(session: AsyncSession) -> Non
     assert proposal.status == "approved" and item.status == "pending"
     jobs = (await session.execute(select(Job).where(Job.kind == "resume_workflow"))).scalars()
     assert jobs.all() == []
+
+
+# --- retrieval indexing (RAG) ---------------------------------------------------------------
+
+
+async def _index_jobs(session: AsyncSession) -> list[Job]:
+    return list((await session.execute(select(Job).where(Job.kind == "index_message"))).scalars())
+
+
+async def test_index_job_queued_when_enabled(session: AsyncSession) -> None:
+    await ingest_message(session, _msg(), OWNER, index=True)
+    await session.commit()
+    (job,) = await _index_jobs(session)
+    row_id = await session.scalar(select(EmailMessage.id))
+    assert job.dedup_key == "mock-account:m1:index_message"
+    assert job.payload == {"message_id": str(row_id)}
+    assert job.serial_key is None  # indexing never waits behind a conversation
+
+
+async def test_no_index_job_by_default(session: AsyncSession) -> None:
+    await ingest_message(session, _msg(), OWNER)
+    await session.commit()
+    assert await _index_jobs(session) == []
+
+
+async def test_owner_mail_is_indexed(session: AsyncSession) -> None:
+    result = await ingest_message(session, _msg(sender="owner@example.com"), OWNER, index=True)
+    await session.commit()
+    assert result.status == "skipped_owner"
+    assert len(await _index_jobs(session)) == 1
+
+
+async def test_automated_and_bounce_mail_is_not_indexed(session: AsyncSession) -> None:
+    await ingest_message(session, _msg("m1", sender="noreply@shop.example"), OWNER, index=True)
+    await ingest_message(session, _msg("m2", sender="mailer-daemon@example.com"), OWNER, index=True)
+    await ingest_message(session, _msg("m3", headers={"List-Id": "<x.y>"}), OWNER, index=True)
+    await session.commit()
+    assert await _index_jobs(session) == []
+
+
+async def test_duplicate_is_not_indexed_twice(session: AsyncSession) -> None:
+    await ingest_message(session, _msg(), OWNER, index=True)
+    await ingest_message(session, _msg(), OWNER, index=True)
+    await session.commit()
+    assert len(await _index_jobs(session)) == 1

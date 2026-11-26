@@ -3,6 +3,8 @@
 None of these commit; the caller owns the transaction.
 """
 
+import uuid
+
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,8 +44,8 @@ async def insert_message(
     msg: NormalizedMessage,
     account_id: str,
     content_hash: str,
-) -> bool:
-    """Insert the message; return False when (account, provider_message_id) already exists."""
+) -> uuid.UUID | None:
+    """Insert the message; return its id, or None when (account, provider_message_id) exists."""
     stmt = (
         insert(EmailMessage)
         .values(
@@ -63,7 +65,7 @@ async def insert_message(
         .on_conflict_do_nothing(index_elements=["account_id", "provider_message_id"])
         .returning(EmailMessage.id)
     )
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def thread_message_ids(session: AsyncSession, thread_id: object) -> list[str]:

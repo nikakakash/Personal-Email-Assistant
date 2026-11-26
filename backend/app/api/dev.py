@@ -76,7 +76,7 @@ async def inject(body: InjectIn, settings: SettingsDep, maker: SessionmakerDep) 
     results = []
     async with maker() as session, session.begin():
         for message in fixture.thread:
-            result = await ingest_message(session, message, identities)
+            result = await ingest_message(session, message, identities, index=settings.rag_enabled)
             results.append(
                 InjectedMessage(
                     **result.model_dump(), provider_message_id=message.provider_message_id

@@ -26,6 +26,7 @@ from app.llm.scripted import ScriptedLLMClient
 from app.providers.interfaces import MailProvider
 from app.providers.mock_calendar import MockCalendarProvider
 from app.providers.mock_mail import MockFaults, MockMailProvider
+from app.retrieval.embeddings import EmbeddingsClient
 
 CHECKPOINT_TABLES = ("checkpoints", "checkpoint_writes", "checkpoint_blobs")
 # The scheduling fixture's message arrived Thursday 19 Nov 2026, 07:30 UTC.
@@ -107,6 +108,7 @@ class DepsBuilder:
         *,
         llm: LLMClient | None = None,
         mail: MailProvider | None = None,
+        embeddings: EmbeddingsClient | None = None,
     ) -> GraphDeps:
         return GraphDeps(
             llm=llm or ScriptedLLMClient(scripts or {}),
@@ -115,6 +117,7 @@ class DepsBuilder:
             sessionmaker=self.sessionmaker,
             settings=self.settings,
             now=lambda: NOW,
+            embeddings=embeddings,
         )
 
 

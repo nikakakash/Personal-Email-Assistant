@@ -1,4 +1,4 @@
-"""Command-line entry point: `python -m app api|worker|migrate`."""
+"""Command-line entry point: `python -m app api|worker|migrate|reindex`."""
 
 import asyncio
 import logging
@@ -21,6 +21,35 @@ def _migrate() -> None:
     cfg.set_main_option("script_location", str(backend_dir / "migrations"))
     alembic_command.upgrade(cfg, "head")
     asyncio.run(prepare_storage(get_settings()))
+
+
+async def _reindex(args: list[str]) -> int:
+    """(Re)build the retrieval index from stored mail with the configured embedding model."""
+    import argparse
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.config import get_settings
+    from app.retrieval.embeddings import make_embeddings_client
+    from app.retrieval.indexer import reindex_all
+
+    parser = argparse.ArgumentParser(prog="python -m app reindex")
+    parser.add_argument("--account", help="only this account id")
+    parser.add_argument("--force", action="store_true", help="re-embed everything")
+    opts = parser.parse_args(args)
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url)
+    try:
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        embedder = make_embeddings_client(settings, maker)
+        stats = await reindex_all(maker, embedder, account_id=opts.account, force=opts.force)
+    finally:
+        await engine.dispose()
+    print(
+        f"reindex ({embedder.model}): {stats.messages} messages, {stats.chunks} chunks, "
+        f"{stats.embedded} embedded"
+    )
+    return 0
 
 
 async def _worker() -> None:
@@ -71,7 +100,10 @@ def main(argv: list[str]) -> int:
         except KeyboardInterrupt:
             return 130
         return 0
-    print("usage: python -m app {api|worker|migrate}", file=sys.stderr)
+    if command == "reindex":
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        return asyncio.run(_reindex(argv[1:]))
+    print("usage: python -m app {api|worker|migrate|reindex}", file=sys.stderr)
     return 2
 
 

@@ -20,7 +20,9 @@ COPY backend/ ./
 COPY evals/ /app/evals/
 RUN uv sync --locked --no-dev
 
-RUN useradd --system --uid 10001 --no-create-home app
+RUN useradd --system --uid 10001 --no-create-home app     && mkdir -p /cache/fastembed && chown -R app /cache
+# Local embedding model cache; compose mounts a volume here so it downloads once.
+ENV FASTEMBED_CACHE_PATH=/cache/fastembed
 USER app
 
 EXPOSE 8000
