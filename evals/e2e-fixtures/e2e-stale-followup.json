@@ -1,0 +1,24 @@
+{
+  "id": "e2e-stale-followup",
+  "thread": [
+    {
+      "provider_message_id": "e2e-stale-m2",
+      "provider_thread_id": "thr-e2e-stale",
+      "rfc_message_id": "<e2e-stale.2@mail.example.net>",
+      "sender": "owner@example.com",
+      "to": [
+        "ida@example.org"
+      ],
+      "cc": [],
+      "subject": "Re: Book club",
+      "body_text": "Count me in! (sent from my phone)",
+      "body_html": null,
+      "received_at": "2026-11-20T10:00:00+00:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "ignore"
+  },
+  "script": {}
+}

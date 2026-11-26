@@ -1,0 +1,86 @@
+# Local stack. `docker compose up -d --build`, then open http://localhost:8080.
+# Settings come from .env (copy .env.example); the database URLs are set here to reach `db`.
+# E2E runs layer compose.e2e.yaml on top of this file (see docs/setup.md).
+
+# api, worker and migrate run one image; only `migrate` builds it (the others start after it).
+x-backend: &backend
+  image: email-assistant-backend:local
+  pull_policy: never
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-email_assistant}
+    CHECKPOINT_DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-email_assistant}
+    APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+    API_HOST: 0.0.0.0
+
+services:
+  db:
+    image: postgres:17.6
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-email_assistant}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: Alembic to head, LangGraph checkpoint tables, the app_flags row.
+  migrate:
+    <<: *backend
+    build:
+      context: .
+      dockerfile: infra/backend.Dockerfile
+    pull_policy: build
+    command: ["python", "-m", "app", "migrate"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *backend
+    command: ["python", "-m", "app", "api"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app", "worker"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+    image: email-assistant-web:local
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:

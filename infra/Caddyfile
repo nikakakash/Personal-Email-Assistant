@@ -1,0 +1,29 @@
+# One origin for the browser: /api/* goes to the FastAPI service, everything else is the SPA.
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	encode gzip
+
+	handle /api/* {
+		# flush_interval -1: stream server-sent events immediately instead of buffering.
+		reverse_proxy api:8000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		root * /srv
+		# Client-side routes (/workflows/..., /settings) fall back to the SPA entry point.
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+	}
+}

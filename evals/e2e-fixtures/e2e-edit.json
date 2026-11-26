@@ -1,0 +1,58 @@
+{
+  "id": "e2e-edit",
+  "thread": [
+    {
+      "provider_message_id": "e2e-edit-m1",
+      "provider_thread_id": "thr-e2e-edit",
+      "rfc_message_id": "<e2e-edit.1@mail.example.net>",
+      "sender": "omar@example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Report draft",
+      "body_text": "Can you send me the report draft by Friday?",
+      "body_html": null,
+      "received_at": "2026-11-20T09:00:00+00:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond"
+  },
+  "script": {
+    "triage": [
+      {
+        "classification": "respond",
+        "urgency": "normal",
+        "reason": "A direct question that needs a reply.",
+        "evidence_refs": [
+          "message:e2e-edit-m1"
+        ],
+        "needs_clarification": false
+      }
+    ],
+    "plan": [
+      {
+        "action": "draft_reply",
+        "reason": "Answer the question."
+      },
+      {
+        "action": "finish",
+        "reason": "Nothing else to do."
+      }
+    ],
+    "draft_reply": [
+      {
+        "to": [
+          "omar@example.org"
+        ],
+        "cc": [],
+        "body_text": "Hi Omar,\n\nYes, I'll send the draft by Friday.\n\nBest",
+        "evidence_refs": [
+          "message:e2e-edit-m1"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,34 @@
+# E2E overlay: scripted LLM, the E2E fixtures, outbound execution on (mock providers only).
+# Run as its own project so it gets a fresh database and never touches your dev data:
+#
+#   docker compose -p email-assistant-e2e -f compose.yaml -f compose.e2e.yaml up -d --build
+#   (cd frontend && npx playwright test)
+#   docker compose -p email-assistant-e2e -f compose.yaml -f compose.e2e.yaml down -v
+#
+# The web UI is on 127.0.0.1:8081 so it can run next to the dev stack on 8080.
+
+x-e2e-env: &e2e-env
+  APP_ENV: development
+  LLM_PROVIDER: scripted
+  ANTHROPIC_API_KEY: ""
+  OUTBOUND_EXECUTION_ENABLED: "true"
+  FIXTURES_DIR: /app/evals/e2e-fixtures
+  OWNER_EMAIL: owner@example.com
+  OWNER_ALIASES: ""
+  OWNER_PASSPHRASE: e2e-owner-passphrase
+  SESSION_SECRET: e2e-session-secret-not-for-production
+  APP_BASE_URL: http://127.0.0.1:8081
+  WORKER_LEASE_SECONDS: "15"
+
+services:
+  db:
+    ports: !reset []
+  migrate:
+    environment: *e2e-env
+  api:
+    environment: *e2e-env
+  worker:
+    environment: *e2e-env
+  web:
+    ports: !override
+      - "127.0.0.1:8081:8080"

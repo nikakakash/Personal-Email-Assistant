@@ -1,0 +1,191 @@
+{
+  "id": "long-thread-contract",
+  "thread": [
+    {
+      "provider_message_id": "long-thread-contract-m1",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.1@mail.example.net>",
+      "sender": "lena@partner.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Contract wording",
+      "body_text": "Message 1 of the discussion about contract wording. Could you confirm the latest version works for you?",
+      "body_html": null,
+      "received_at": "2026-11-18T16:00:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m2",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.2@mail.example.net>",
+      "sender": "owner@example.com",
+      "to": [
+        "lena@partner.example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 2 of the discussion about contract wording. Thanks, noted. I will check and come back to you.",
+      "body_html": null,
+      "received_at": "2026-11-18T17:30:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m3",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.3@mail.example.net>",
+      "sender": "lena@partner.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 3 of the discussion about contract wording. Could you confirm the latest version works for you?",
+      "body_html": null,
+      "received_at": "2026-11-18T19:00:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m4",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.4@mail.example.net>",
+      "sender": "owner@example.com",
+      "to": [
+        "lena@partner.example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 4 of the discussion about contract wording. Thanks, noted. I will check and come back to you.",
+      "body_html": null,
+      "received_at": "2026-11-18T20:30:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m5",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.5@mail.example.net>",
+      "sender": "lena@partner.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 5 of the discussion about contract wording. Could you confirm the latest version works for you?",
+      "body_html": null,
+      "received_at": "2026-11-18T22:00:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m6",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.6@mail.example.net>",
+      "sender": "owner@example.com",
+      "to": [
+        "lena@partner.example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 6 of the discussion about contract wording. Thanks, noted. I will check and come back to you.",
+      "body_html": null,
+      "received_at": "2026-11-18T23:30:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m7",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.7@mail.example.net>",
+      "sender": "lena@partner.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 7 of the discussion about contract wording. Could you confirm the latest version works for you?",
+      "body_html": null,
+      "received_at": "2026-11-19T01:00:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m8",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.8@mail.example.net>",
+      "sender": "owner@example.com",
+      "to": [
+        "lena@partner.example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 8 of the discussion about contract wording. Thanks, noted. I will check and come back to you.",
+      "body_html": null,
+      "received_at": "2026-11-19T02:30:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m9",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.9@mail.example.net>",
+      "sender": "lena@partner.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 9 of the discussion about contract wording. Could you confirm the latest version works for you?",
+      "body_html": null,
+      "received_at": "2026-11-19T04:00:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m10",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.10@mail.example.net>",
+      "sender": "owner@example.com",
+      "to": [
+        "lena@partner.example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 10 of the discussion about contract wording. Thanks, noted. I will check and come back to you.",
+      "body_html": null,
+      "received_at": "2026-11-19T05:30:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m11",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.11@mail.example.net>",
+      "sender": "lena@partner.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 11 of the discussion about contract wording. Could you confirm the latest version works for you?",
+      "body_html": null,
+      "received_at": "2026-11-19T07:00:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "long-thread-contract-m12",
+      "provider_thread_id": "thr-long-thread-contract",
+      "rfc_message_id": "<long-thread-contract.12@mail.example.net>",
+      "sender": "lena@partner.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Re: Contract wording",
+      "body_text": "Message 12: any news? I need your confirmation before Monday.",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

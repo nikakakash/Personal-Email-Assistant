@@ -1,0 +1,29 @@
+{
+  "id": "newsletter-weekly",
+  "thread": [
+    {
+      "provider_message_id": "newsletter-weekly-m1",
+      "provider_thread_id": "thr-newsletter-weekly",
+      "rfc_message_id": "<newsletter-weekly.1@mail.example.net>",
+      "sender": "editor@weekly.example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "This week in Python",
+      "body_text": "Top stories this week: release notes, typing tips and a new async library.\n\nUnsubscribe: https://weekly.example.org/u",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {
+        "List-Id": "<python-weekly.weekly.example.org>",
+        "List-Unsubscribe": "<https://weekly.example.org/u>"
+      }
+    }
+  ],
+  "label": {
+    "classification": "ignore",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

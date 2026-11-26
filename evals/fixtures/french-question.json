@@ -1,0 +1,26 @@
+{
+  "id": "french-question",
+  "thread": [
+    {
+      "provider_message_id": "french-question-m1",
+      "provider_thread_id": "thr-french-question",
+      "rfc_message_id": "<french-question.1@mail.example.net>",
+      "sender": "marc@amis.example.fr",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Question sur le contrat",
+      "body_text": "Salut,\n\nEst-ce que tu as pu relire le contrat de location ? J'aimerais le signer avant vendredi.\n\nMarc",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

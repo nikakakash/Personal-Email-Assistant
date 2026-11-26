@@ -1,0 +1,26 @@
+{
+  "id": "promo-sale",
+  "thread": [
+    {
+      "provider_message_id": "promo-sale-m1",
+      "provider_thread_id": "thr-promo-sale",
+      "rfc_message_id": "<promo-sale.1@mail.example.net>",
+      "sender": "deals@shop.example.com",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "50% off everything - this weekend only!",
+      "body_text": "Don't miss our biggest sale of the year. Use code WINTER50 at checkout. Unsubscribe: https://shop.example.com/unsub",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "ignore",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

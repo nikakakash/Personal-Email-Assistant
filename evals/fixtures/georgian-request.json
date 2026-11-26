@@ -1,0 +1,26 @@
+{
+  "id": "georgian-request",
+  "thread": [
+    {
+      "provider_message_id": "georgian-request-m1",
+      "provider_thread_id": "thr-georgian-request",
+      "rfc_message_id": "<georgian-request.1@mail.example.net>",
+      "sender": "nino@mail.example.ge",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "შეხვედრა",
+      "body_text": "გამარჯობა,\n\nშეგვიძლია თუ არა ხვალ ნახევარ საათში დავილაპარაკოთ პროექტზე? გთხოვთ მაცნობოთ.\n\nნინო",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

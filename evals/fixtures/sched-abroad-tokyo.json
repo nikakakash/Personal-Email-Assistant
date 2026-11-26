@@ -1,0 +1,26 @@
+{
+  "id": "sched-abroad-tokyo",
+  "thread": [
+    {
+      "provider_message_id": "sched-abroad-tokyo-m1",
+      "provider_thread_id": "thr-sched-abroad-tokyo",
+      "rfc_message_id": "<sched-abroad-tokyo.1@mail.example.net>",
+      "sender": "kenji@partner.example.jp",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Call this week",
+      "body_text": "Hello,\n\nI'd like to set up a 30 minute call tomorrow afternoon. Does that work for you?\n\nKenji (Tokyo)",
+      "body_html": null,
+      "received_at": "2026-11-19T16:30:00+09:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": true,
+    "urgency": "normal"
+  },
+  "script": {}
+}

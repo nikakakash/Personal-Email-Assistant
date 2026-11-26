@@ -1,0 +1,49 @@
+{
+  "id": "replyall-party",
+  "thread": [
+    {
+      "provider_message_id": "replyall-party-m1",
+      "provider_thread_id": "thr-replyall-party",
+      "rfc_message_id": "<replyall-party.1@mail.example.net>",
+      "sender": "alice@friends.example.org",
+      "to": [
+        "owner@example.com",
+        "dave@friends.example.org"
+      ],
+      "cc": [
+        "erin@friends.example.org",
+        "frank@friends.example.org"
+      ],
+      "subject": "Surprise party for Sam",
+      "body_text": "Team, what do we think about the plan? Please reply all with your view.",
+      "body_html": null,
+      "received_at": "2026-11-19T08:00:00+01:00",
+      "headers": {}
+    },
+    {
+      "provider_message_id": "replyall-party-m2",
+      "provider_thread_id": "thr-replyall-party",
+      "rfc_message_id": "<replyall-party.2@mail.example.net>",
+      "sender": "dave@friends.example.org",
+      "to": [
+        "alice@friends.example.org",
+        "owner@example.com"
+      ],
+      "cc": [
+        "erin@friends.example.org",
+        "frank@friends.example.org"
+      ],
+      "subject": "Re: Surprise party for Sam",
+      "body_text": "I'm in favour. Owner, can you take the lead on the details?",
+      "body_html": null,
+      "received_at": "2026-11-19T08:30:00+01:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond",
+    "needs_question": false,
+    "urgency": "normal"
+  },
+  "script": {}
+}

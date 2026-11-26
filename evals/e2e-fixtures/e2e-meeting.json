@@ -1,0 +1,71 @@
+{
+  "id": "e2e-meeting",
+  "thread": [
+    {
+      "provider_message_id": "e2e-meeting-m1",
+      "provider_thread_id": "thr-e2e-meeting",
+      "rfc_message_id": "<e2e-meeting.1@mail.example.net>",
+      "sender": "arjun@example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Project kickoff",
+      "body_text": "Can you set up a 30-minute kickoff call with me?",
+      "body_html": null,
+      "received_at": "2026-11-20T09:00:00+00:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond"
+  },
+  "script": {
+    "triage": [
+      {
+        "classification": "respond",
+        "urgency": "normal",
+        "reason": "A meeting request.",
+        "evidence_refs": [
+          "message:e2e-meeting-m1"
+        ],
+        "needs_clarification": false
+      }
+    ],
+    "plan": [
+      {
+        "action": "get_freebusy",
+        "reason": "Check the owner's calendar for that day.",
+        "freebusy": {
+          "start_date": "{{workday}}",
+          "end_date": "{{workday}}"
+        }
+      },
+      {
+        "action": "draft_meeting",
+        "reason": "Propose the first free slot."
+      },
+      {
+        "action": "finish",
+        "reason": "Nothing else to do."
+      }
+    ],
+    "draft_meeting": [
+      {
+        "title": "Project kickoff",
+        "start_local": "{{workday}}T14:30:00",
+        "end_local": "{{workday}}T15:00:00",
+        "time_zone": "Asia/Kolkata",
+        "attendees": [
+          "arjun@example.org"
+        ],
+        "location": "Video call",
+        "send_updates": "all",
+        "evidence_refs": [
+          "availability:{{workday}}:{{workday}}",
+          "message:e2e-meeting-m1"
+        ]
+      }
+    ]
+  }
+}
