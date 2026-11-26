@@ -26,7 +26,7 @@ dependencies = [
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", ".."]  # ".." so tests can import evals/
 
 [tool.ruff]
 line-length = 100
