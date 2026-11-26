@@ -1,0 +1,285 @@
+{
+  "corpus_messages": 151,
+  "reports": [
+    {
+      "embedder": "-",
+      "mode": "keyword",
+      "scope": "participants",
+      "queries": 60,
+      "recall_at_5": 0.95,
+      "recall_at_10": 0.95,
+      "mrr": 0.8972,
+      "ndcg_at_10": 0.8994,
+      "latency_p50_ms": 8.2,
+      "latency_p95_ms": 11.5,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.9605,
+        "superseded": 0.75
+      },
+      "misses_at_5": [
+        "q01",
+        "q17",
+        "q28",
+        "q36"
+      ]
+    },
+    {
+      "embedder": "hash",
+      "mode": "vector",
+      "scope": "participants",
+      "queries": 60,
+      "recall_at_5": 0.975,
+      "recall_at_10": 1.0,
+      "mrr": 0.8681,
+      "ndcg_at_10": 0.8924,
+      "latency_p50_ms": 13.0,
+      "latency_p95_ms": 16.6,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 1.0,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.9605,
+        "superseded": 1.0
+      },
+      "misses_at_5": [
+        "q28",
+        "q48"
+      ]
+    },
+    {
+      "embedder": "hash",
+      "mode": "hybrid",
+      "scope": "participants",
+      "queries": 60,
+      "recall_at_5": 0.9833,
+      "recall_at_10": 1.0,
+      "mrr": 0.8903,
+      "ndcg_at_10": 0.9141,
+      "latency_p50_ms": 16.7,
+      "latency_p95_ms": 21.7,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 1.0,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.9868,
+        "superseded": 0.875
+      },
+      "misses_at_5": [
+        "q01",
+        "q28"
+      ]
+    },
+    {
+      "embedder": "-",
+      "mode": "keyword",
+      "scope": "mailbox",
+      "queries": 60,
+      "recall_at_5": 0.85,
+      "recall_at_10": 0.9083,
+      "mrr": 0.8374,
+      "ndcg_at_10": 0.8326,
+      "latency_p50_ms": 9.1,
+      "latency_p95_ms": 11.9,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 0.5,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.8947,
+        "superseded": 0.5
+      },
+      "misses_at_5": [
+        "q01",
+        "q07",
+        "q13",
+        "q17",
+        "q18",
+        "q23",
+        "q28",
+        "q35",
+        "q36",
+        "q47",
+        "q49",
+        "q57"
+      ]
+    },
+    {
+      "embedder": "hash",
+      "mode": "vector",
+      "scope": "mailbox",
+      "queries": 60,
+      "recall_at_5": 0.6917,
+      "recall_at_10": 0.8,
+      "mrr": 0.5947,
+      "ndcg_at_10": 0.6215,
+      "latency_p50_ms": 14.3,
+      "latency_p95_ms": 21.4,
+      "recall_at_5_by_category": {
+        "collision": 0.75,
+        "identifier": 0.9167,
+        "multi": 0.5,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.6447,
+        "superseded": 0.75
+      },
+      "misses_at_5": [
+        "q01",
+        "q06",
+        "q12",
+        "q13",
+        "q15",
+        "q16",
+        "q17",
+        "q18",
+        "q28",
+        "q30",
+        "q35",
+        "q36",
+        "q37",
+        "q40",
+        "q44",
+        "q47",
+        "q48",
+        "q49",
+        "q53",
+        "q54",
+        "q57",
+        "q58"
+      ]
+    },
+    {
+      "embedder": "hash",
+      "mode": "hybrid",
+      "scope": "mailbox",
+      "queries": 60,
+      "recall_at_5": 0.8917,
+      "recall_at_10": 0.9333,
+      "mrr": 0.8159,
+      "ndcg_at_10": 0.8348,
+      "latency_p50_ms": 19.3,
+      "latency_p95_ms": 23.9,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 0.8,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.8947,
+        "superseded": 0.75
+      },
+      "misses_at_5": [
+        "q01",
+        "q13",
+        "q15",
+        "q17",
+        "q28",
+        "q35",
+        "q36",
+        "q57"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "vector",
+      "scope": "participants",
+      "queries": 60,
+      "recall_at_5": 0.9917,
+      "recall_at_10": 1.0,
+      "mrr": 0.9228,
+      "ndcg_at_10": 0.9375,
+      "latency_p50_ms": 31.8,
+      "latency_p95_ms": 45.6,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 1.0,
+        "superseded": 1.0
+      },
+      "misses_at_5": [
+        "q36"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "hybrid",
+      "scope": "participants",
+      "queries": 60,
+      "recall_at_5": 0.9917,
+      "recall_at_10": 1.0,
+      "mrr": 0.9006,
+      "ndcg_at_10": 0.9235,
+      "latency_p50_ms": 40.6,
+      "latency_p95_ms": 83.0,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 1.0,
+        "superseded": 1.0
+      },
+      "misses_at_5": [
+        "q36"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "vector",
+      "scope": "mailbox",
+      "queries": 60,
+      "recall_at_5": 0.9583,
+      "recall_at_10": 0.975,
+      "mrr": 0.8719,
+      "ndcg_at_10": 0.894,
+      "latency_p50_ms": 35.3,
+      "latency_p95_ms": 62.4,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.8333,
+        "multi": 0.8,
+        "near-duplicate": 1.0,
+        "paraphrase": 1.0,
+        "superseded": 0.875
+      },
+      "misses_at_5": [
+        "q01",
+        "q12",
+        "q23",
+        "q36"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "hybrid",
+      "scope": "mailbox",
+      "queries": 60,
+      "recall_at_5": 0.95,
+      "recall_at_10": 0.9583,
+      "mrr": 0.8708,
+      "ndcg_at_10": 0.8856,
+      "latency_p50_ms": 36.4,
+      "latency_p95_ms": 69.0,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 0.9,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.9737,
+        "superseded": 0.75
+      },
+      "misses_at_5": [
+        "q01",
+        "q17",
+        "q36",
+        "q47"
+      ]
+    }
+  ]
+}

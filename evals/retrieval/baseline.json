@@ -1,0 +1,7 @@
+[
+  {"embedder": "fastembed", "mode": "hybrid", "scope": "mailbox", "metric": "recall_at_5", "min": 0.93},
+  {"embedder": "fastembed", "mode": "vector", "scope": "mailbox", "metric": "recall_at_5", "min": 0.94},
+  {"embedder": "fastembed", "mode": "hybrid", "scope": "mailbox", "metric": "mrr", "min": 0.85},
+  {"embedder": "fastembed", "mode": "hybrid", "scope": "participants", "metric": "recall_at_5", "min": 0.97},
+  {"embedder": "-", "mode": "keyword", "scope": "mailbox", "metric": "recall_at_5", "min": 0.83}
+]

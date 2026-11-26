@@ -20,7 +20,7 @@ and a pending review survives.
 
 | Service | Image | Role |
 |---|---|---|
-| `db` | `pgvector/pgvector:0.8.6-pg17` | app tables, the job queue, LangGraph checkpoints, the event log, the retrieval index |
+| `db` | `pgvector/pgvector:0.8.6-pg17-trixie` | app tables, the job queue, LangGraph checkpoints, the event log, the retrieval index |
 | `migrate` | backend | one-shot schema migration plus checkpoint setup, before `api`/`worker` start |
 | `api` | backend | HTTP API: login, review queue, decisions, preferences, flags, usage, SSE `/events`, dev tools |
 | `worker` | backend | job loop: `start_workflow` / `resume` jobs, leases, retries, crash recovery |
