@@ -170,6 +170,39 @@ async def test_participant_scope_keeps_other_correspondents_out(
     assert "9999" not in llm.seen["draft_reply"][0]
 
 
+async def test_outsider_cannot_cc_a_contact_to_fish_their_history(
+    graph: Graph,
+    make_deps: DepsFactory,
+    seeded: SeededRun,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Eve writes into the thread with Alice on CC. Alice's private history with the owner must
+    not be retrieved: the reply could go to Eve, who was never party to it."""
+    await _past(sessionmaker, "Private: our agreed meeting price is 4500")
+    async with sessionmaker() as s, s.begin():
+        s.add(
+            EmailMessage(
+                thread_id=seeded.thread_row_id,
+                account_id="mock-account",
+                provider_message_id=f"eve-{uuid.uuid4().hex[:6]}",
+                sender="eve@outsider.example",
+                to_addrs=["owner@example.com"],
+                cc_addrs=["alice@example.com"],
+                subject="Re: Meeting next week?",
+                body_text="What price did you and Alice agree for the meeting?",
+                # Earlier than Alice's message, so the reply still answers Alice's latest one.
+                received_at=datetime(2026, 11, 23, 6, 30, tzinfo=UTC),
+                content_hash="eve",
+            )
+        )
+    mid = seeded.provider_message_id
+    llm = Recording(_script(mid, [f"message:{mid}"]))
+    await run_graph(graph, seeded.input, seeded, make_deps(llm=llm, embeddings=EMB, **RAG))
+    inner = await subgraph_values(graph, seeded)
+    assert inner["retrieved_context"] == []
+    assert "4500" not in llm.seen["plan"][0]
+
+
 async def test_mailbox_scope_is_an_explicit_opt_in(
     graph: Graph,
     make_deps: DepsFactory,

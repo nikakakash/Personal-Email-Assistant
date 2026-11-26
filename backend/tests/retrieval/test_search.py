@@ -273,3 +273,28 @@ async def test_empty_participant_scope_returns_nothing(
     session: AsyncSession, corpus: dict[str, EmailMessage]
 ) -> None:
     assert await search(session, EMB, account_id="acct", query="price", participants=[]) == []
+
+
+async def test_participant_scope_requires_every_participant(
+    sessionmaker: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    """An outsider who CCs Alex must not unlock Alex's private history: a past message is in
+    scope only if every current participant (every possible reply recipient) was party to it."""
+    private = await _add(sessionmaker, "price agreed at 4500", sender="alex@example.com")
+    shared = await _add(sessionmaker, "price agreed for all of us", sender="alex@example.com")
+    async with sessionmaker() as s, s.begin():
+        await s.execute(
+            text(
+                "update email_messages set cc_addrs = array['eve@outsider.example'] where id = :id"
+            ),
+            {"id": shared.id},
+        )
+    hits = await search(
+        session,
+        EMB,
+        account_id="acct",
+        query="price agreed",
+        participants=["alex@example.com", "eve@outsider.example"],
+    )
+    assert _ids(hits) == [shared.provider_message_id]
+    assert private.provider_message_id not in _ids(hits)

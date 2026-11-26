@@ -11,7 +11,7 @@
 - hybrid_rerank: hybrid candidates re-scored by a cross-encoder.
 
 Every query is scoped to one account (mandatory) and can exclude the current thread and be
-limited to messages involving given participants. Results
+limited to messages that all given participants were party to. Results
 are one hit per message: its best-ranked chunk.
 """
 
@@ -63,11 +63,14 @@ def rrf_fuse(rankings: Sequence[Sequence[Any]], k: int = RRF_K) -> list[tuple[An
     return sorted(scores.items(), key=lambda item: (-item[1], str(item[0])))
 
 
-# The bare address of each sender/to/cc entry ("Name <a@x>" or "a@x"), lowercased.
+# Every requested participant was a party (sender, to or cc) of the past message. "All", not
+# "any": otherwise an outsider could CC someone into a new thread and pull that person's private
+# history into a reply the outsider receives. Addresses are compared bare and lowercased
+# ("Name <a@x>" -> "a@x").
 _PARTICIPANT_MATCH = (
-    "EXISTS (SELECT 1 FROM unnest(m.to_addrs || m.cc_addrs || ARRAY[m.sender]) AS p(addr) "
-    "WHERE coalesce(lower(substring(p.addr from '<([^>]+)>')), lower(btrim(p.addr))) "
-    "= ANY(:participants))"
+    "ARRAY(SELECT coalesce(lower(substring(p.addr from '<([^>]+)>')), lower(btrim(p.addr))) "
+    "FROM unnest(m.to_addrs || m.cc_addrs || ARRAY[m.sender]) AS p(addr)) "
+    "@> CAST(:participants AS text[])"
 )
 
 
@@ -205,8 +208,8 @@ async def search(
     participants: Sequence[str] | None = None,
     reranker: Reranker | None = None,
 ) -> list[Hit]:
-    """`participants` (bare addresses) limits results to messages any of them sent or
-    received, so one correspondent's mail cannot surface in a reply to someone else."""
+    """`participants` (bare addresses) limits results to messages that all of them were party
+    to, so nobody's mail can surface in a reply that reaches someone who was not on it."""
     if not account_id:
         raise ValueError("account_id is required: retrieval is always scoped to one account")
     if mode == "hybrid_rerank" and reranker is None:

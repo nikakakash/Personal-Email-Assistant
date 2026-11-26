@@ -6,8 +6,10 @@ data, citable as `history:<provider_message_id>`, and validation accepts exactly
 
 Boundaries, enforced in code rather than by the prompt:
 - Scope: always the run's account, never the current thread, and by default
-  (`RETRIEVAL_SCOPE=participants`) only messages that one of the current thread's
-  correspondents sent or received, so one person's mail never surfaces in a reply to another.
+  (`RETRIEVAL_SCOPE=participants`) only past messages that every external participant of the
+  current thread was party to. Replies can only go to those participants, so no retrieved
+  message can reach someone who was not on it; and an outsider who CCs a contact into a new
+  thread cannot pull that contact's private history into the reply.
 - Authority: retrieved text is context only. Recipients are still limited to the current
   thread's participants by `validate_payload`, whatever a past email asks for.
 - Failure: a search error or timeout is recorded as a `history` finding and the run goes on
