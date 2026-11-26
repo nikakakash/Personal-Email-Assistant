@@ -1,4 +1,4 @@
-# CI: backend (lint, types, tests on Postgres 17.6), frontend (types, unit tests, build),
+# CI: backend (lint, types, tests on Postgres 17 + pgvector), frontend (types, unit tests, build),
 # E2E (the compose E2E overlay plus Playwright) and a lockfile check.
 name: CI
 
@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17.6
+        image: pgvector/pgvector:0.8.6-pg17
         env:
           POSTGRES_USER: app
           POSTGRES_PASSWORD: app

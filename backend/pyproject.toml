@@ -11,6 +11,7 @@ dependencies = [
     "langgraph>=1.2.24",
     "langgraph-checkpoint-postgres>=3.2.1",
     "nh3>=0.3.8",
+    "pgvector>=0.5.1",
     "psycopg[binary,pool]>=3.3.9",
     "pydantic-settings>=2.16.3",
     "sqlalchemy[asyncio]>=2.1.9",

@@ -51,6 +51,16 @@ class Settings(BaseSettings):
     effort_plan: str = "medium"
     effort_draft: str = "medium"
 
+    # Retrieval over past email (RAG). Off by default; see app/retrieval/.
+    rag_enabled: bool = False
+    embeddings_provider: Literal["fastembed", "voyage", "hash"] = "fastembed"
+    embed_model: str = "bge-small-en-v1.5"
+    voyage_api_key: SecretStr | None = None
+    retrieval_mode: Literal["bm25", "vector", "hybrid", "hybrid_rerank"] = "hybrid"
+    retrieval_top_k: int = 5
+    rag_rerank: bool = False
+    rag_contextualize: bool = False
+
     max_agent_steps: int = 10
     daily_budget_usd: Decimal = Decimal("2.00")
     outbound_execution_enabled: bool = False
@@ -87,6 +97,7 @@ class Settings(BaseSettings):
             "session_secret": self.session_secret,
             "owner_passphrase": self.owner_passphrase,
             "anthropic_api_key": self.anthropic_api_key,
+            "voyage_api_key": self.voyage_api_key,
         }
         for name, secret in secrets.items():
             if secret is not None and secret.get_secret_value() == PLACEHOLDER:

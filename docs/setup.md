@@ -59,7 +59,7 @@ docker compose up -d --build
 
 | Service | What it does |
 |---|---|
-| `db` | Postgres 17.6 (published on `127.0.0.1:5433` for tests and local tools) |
+| `db` | Postgres 17 + pgvector (published on `127.0.0.1:5433` for tests and local tools) |
 | `migrate` | one-shot: Alembic migrations, LangGraph checkpoint tables, the flags row |
 | `api` | FastAPI on port 8000 (internal) |
 | `worker` | runs workflows from the job queue; restarts automatically |

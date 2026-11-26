@@ -10,10 +10,12 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     Index,
@@ -21,10 +23,11 @@ from sqlalchemy import (
     Numeric,
     Text,
     UniqueConstraint,
+    cast,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 WORKFLOW_STATUSES = (
@@ -116,6 +119,74 @@ class EmailMessage(Base):
     body_html: Mapped[str | None] = mapped_column(Text)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+# Embedding models with an HNSW index (migration 0004): model name -> vector dimension.
+# Adding a model means a migration with one more partial index, then `python -m app reindex`.
+EMBEDDING_DIMENSIONS = {"bge-small-en-v1.5": 384, "voyage-3.5-lite": 512}
+
+
+def embedding_index_name(model: str) -> str:
+    return "ix_chunk_embeddings_hnsw_" + model.replace("-", "_").replace(".", "_")
+
+
+class MessageChunk(Base):
+    """A retrievable piece of one email. Deleting the message deletes its chunks (spec §11)."""
+
+    __tablename__ = "message_chunks"
+    __table_args__ = (
+        UniqueConstraint("message_id", "chunk_index"),
+        Index("ix_message_chunks_tsv", "tsv", postgresql_using="gin"),
+        Index("ix_message_chunks_account_received", "account_id", "received_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("email_messages.id", ondelete="CASCADE"), nullable=False
+    )
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("email_threads.id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    # Optional one-line situating context written by a model (contextual retrieval).
+    context_prefix: Mapped[str | None] = mapped_column(Text)
+    sender: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    tsv: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('english', coalesce(context_prefix, '') || ' ' || text)",
+            persisted=True,
+        ),
+    )
+    created_at: Mapped[datetime] = _ts()
+
+
+class ChunkEmbedding(Base):
+    """One embedding of a chunk per model; the column has no fixed dimension so several
+    models coexist, each with its own partial HNSW index (see EMBEDDING_DIMENSIONS)."""
+
+    __tablename__ = "chunk_embeddings"
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("message_chunks.id", ondelete="CASCADE"), primary_key=True
+    )
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    embedding: Mapped[list[float]] = mapped_column(Vector(), nullable=False)
+    created_at: Mapped[datetime] = _ts()
+
+
+for _model, _dim in EMBEDDING_DIMENSIONS.items():
+    _label = f"embedding_{_dim}"
+    Index(
+        embedding_index_name(_model),
+        cast(ChunkEmbedding.embedding, Vector(_dim)).label(_label),
+        postgresql_using="hnsw",
+        postgresql_ops={_label: "vector_cosine_ops"},
+        postgresql_where=ChunkEmbedding.model == _model,
+    )
 
 
 class WorkflowRun(Base):

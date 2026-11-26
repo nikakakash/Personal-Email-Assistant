@@ -56,7 +56,7 @@ flowchart LR
     B[Browser<br/>React SPA] -->|HTTPS :8080| W[web<br/>Caddy]
     W -->|/api/*| A[api<br/>FastAPI]
     W -->|static files| B
-    A <-->|SQL| DB[(Postgres 17.6)]
+    A <-->|SQL| DB[(Postgres 17 + pgvector)]
     K[worker<br/>LangGraph runner] <-->|jobs, checkpoints,<br/>app tables| DB
     K -->|triage / plan / draft| C[Claude API]
     K -->|read thread, send| M[Mail provider<br/>mock today, Gmail later]

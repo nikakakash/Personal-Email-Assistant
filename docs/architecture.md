@@ -4,7 +4,7 @@
  browser ──► web (Caddy :8080) ──/api/*──► api (FastAPI)
                 │ static SPA                 │  owner auth, CSRF, reviews, decisions, SSE
                                              ▼
-                                   Postgres 17.6 ◄────────── worker (LangGraph)
+                                   Postgres 17+pgv ◄────────── worker (LangGraph)
                          app tables · job queue · checkpoints   │ claims jobs, runs graphs
                                                                 ▼
                                        Anthropic API (triage/plan/draft) · mock mail · mock calendar
@@ -20,7 +20,7 @@ and a pending review survives.
 
 | Service | Image | Role |
 |---|---|---|
-| `db` | `postgres:17.6` | app tables, the job queue, LangGraph checkpoints, the event log |
+| `db` | `pgvector/pgvector:0.8.6-pg17` | app tables, the job queue, LangGraph checkpoints, the event log, the retrieval index |
 | `migrate` | backend | one-shot schema migration plus checkpoint setup, before `api`/`worker` start |
 | `api` | backend | HTTP API: login, review queue, decisions, preferences, flags, usage, SSE `/events`, dev tools |
 | `worker` | backend | job loop: `start_workflow` / `resume` jobs, leases, retries, crash recovery |
