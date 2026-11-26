@@ -15,6 +15,7 @@ PROMPT_VERSIONS: dict[str, str] = {
     "plan": "plan_v2",
     "draft_reply": "draft_reply_v2",
     "draft_meeting": "draft_meeting_v2",
+    "contextualize": "contextualize_v1",
 }
 
 

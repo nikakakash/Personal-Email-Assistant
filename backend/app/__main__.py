@@ -30,6 +30,8 @@ async def _reindex(args: list[str]) -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.config import get_settings
+    from app.llm.factory import make_llm_client
+    from app.retrieval.contextualize import LLMContextualizer
     from app.retrieval.embeddings import make_embeddings_client
     from app.retrieval.indexer import reindex_all
 
@@ -42,7 +44,18 @@ async def _reindex(args: list[str]) -> int:
     try:
         maker = async_sessionmaker(engine, expire_on_commit=False)
         embedder = make_embeddings_client(settings, maker)
-        stats = await reindex_all(maker, embedder, account_id=opts.account, force=opts.force)
+        contextualizer = (
+            LLMContextualizer(make_llm_client(settings, maker))
+            if settings.rag_contextualize
+            else None
+        )
+        stats = await reindex_all(
+            maker,
+            embedder,
+            account_id=opts.account,
+            force=opts.force,
+            contextualizer=contextualizer,
+        )
     finally:
         await engine.dispose()
     print(

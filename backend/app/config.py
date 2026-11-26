@@ -47,21 +47,26 @@ class Settings(BaseSettings):
     model_triage: str = "claude-opus-5-5"
     model_plan: str = "claude-opus-5-5"
     model_draft: str = "claude-opus-5-5"
+    # Contextual retrieval writes one sentence per chunk: a small, cheap model is enough.
+    model_contextualize: str = "claude-haiku-5-5"
     effort_triage: str = "low"
     effort_plan: str = "medium"
     effort_draft: str = "medium"
+    effort_contextualize: str = "low"
 
     # Retrieval over past email (RAG). Off by default; see app/retrieval/.
     rag_enabled: bool = False
     embeddings_provider: Literal["fastembed", "voyage", "hash"] = "fastembed"
     embed_model: str = "bge-small-en-v1.5"
     voyage_api_key: SecretStr | None = None
+    # hybrid_rerank adds the local cross-encoder over the top hybrid candidates.
     retrieval_mode: Literal["keyword", "vector", "hybrid", "hybrid_rerank"] = "hybrid"
     retrieval_top_k: int = 5
     # participants: only past mail that every external participant of the current thread was
     # party to (no cross-correspondent leakage, no CC fishing); mailbox: the whole account.
     retrieval_scope: Literal["participants", "mailbox"] = "participants"
-    rag_rerank: bool = False
+    # Index-time contextual retrieval (one model call per new chunk); needs a model provider.
+    # Turning it on later takes `python -m app reindex --force` for existing mail.
     rag_contextualize: bool = False
 
     max_agent_steps: int = 10

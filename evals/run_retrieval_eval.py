@@ -42,7 +42,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "backend"))
 sys.path.insert(0, str(REPO))
 
-from evals.retrieval.corpus import MESSAGES, QUERIES  # noqa: E402
+from evals.retrieval.corpus import MESSAGES, OWNER, QUERIES  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
     create_async_engine,
 )
 
+from app.retrieval.contextualize import Contextualizer  # noqa: E402
 from app.retrieval.embeddings import EmbeddingsClient  # noqa: E402
 from app.retrieval.indexer import reindex_all  # noqa: E402
 from app.retrieval.rerank import Reranker  # noqa: E402
@@ -271,6 +272,29 @@ def make_embedder(
     raise SystemExit(f"unknown embedder {name!r} (hash, fastembed, voyage)")
 
 
+def make_contextualizer(
+    url: str, maker: async_sessionmaker[AsyncSession], budget: Decimal
+) -> "Contextualizer":
+    """Claude (MODEL_CONTEXTUALIZE, default Haiku) through the app's budgeted client."""
+    from app.config import Settings
+    from app.llm.factory import make_llm_client
+    from app.retrieval.contextualize import LLMContextualizer
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise SystemExit("--contextualize needs ANTHROPIC_API_KEY")
+    settings = Settings(  # type: ignore[call-arg]
+        database_url=url,
+        checkpoint_database_url=url.replace("postgresql+psycopg://", "postgresql://", 1),
+        app_base_url="http://eval.invalid",
+        owner_email=OWNER,
+        owner_passphrase="eval-run-not-used",
+        session_secret="eval-run-not-used",
+        llm_provider="anthropic",
+        daily_budget_usd=budget,
+    )
+    return LLMContextualizer(make_llm_client(settings, maker))
+
+
 async def run_queries(
     maker: async_sessionmaker[AsyncSession],
     embedder: EmbeddingsClient,
@@ -372,21 +396,23 @@ async def main(argv: Sequence[str] | None = None) -> int:
 
             reranker = FastEmbedReranker()
         scopes = ["participants", "mailbox"] if args.scope == "both" else [args.scope]
+        contextualizer = (
+            make_contextualizer(url, maker, args.daily_budget) if args.contextualize else None
+        )
+        suffix = "+ctx" if contextualizer else ""
         for name in embedders:
             embedder = make_embedder(name, maker, args.daily_budget)
             started = time.perf_counter()
-            if args.contextualize:
-                from evals.retrieval.contextualize import contextualize_all
-
-                await contextualize_all(maker, ACCOUNT, args.daily_budget)
-            stats = await reindex_all(maker, embedder, account_id=ACCOUNT)
+            stats = await reindex_all(
+                maker, embedder, account_id=ACCOUNT, force=True, contextualizer=contextualizer
+            )
             print(f"[{name}] indexed {stats.chunks} chunks in {time.perf_counter() - started:.1f}s")
             for scope in scopes:
                 for mode in modes:
                     if mode == "keyword" and name != embedders[0]:
                         continue  # keyword ranking does not depend on the embedder
                     results = await run_queries(maker, embedder, mode, scope, reranker)  # type: ignore[arg-type]
-                    label = "-" if mode == "keyword" else name
+                    label = ("-" if mode == "keyword" else name) + suffix
                     reports.append(summarize(label, mode, scope, results))
     finally:
         await engine.dispose()
@@ -397,7 +423,8 @@ async def main(argv: Sequence[str] | None = None) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps({"corpus_messages": count, "reports": [asdict(r) for r in reports]}, indent=2)
-        + "\n"
+        + "\n",
+        newline="\n",  # LF on every platform (the repo's .gitattributes)
     )
     print(f"\nwrote {out}")
     if args.check_baseline:

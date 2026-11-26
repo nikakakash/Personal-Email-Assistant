@@ -68,7 +68,8 @@ def test_rag_is_off_by_default_with_local_embeddings(base_env: None) -> None:
     assert s.embeddings_provider == "fastembed"
     assert s.embed_model == "bge-small-en-v1.5"
     assert (s.retrieval_mode, s.retrieval_top_k) == ("hybrid", 5)
-    assert s.rag_rerank is False and s.rag_contextualize is False
+    assert s.rag_contextualize is False
+    assert (s.model_contextualize, s.effort_contextualize) == ("claude-haiku-5-5", "low")
     assert s.voyage_api_key is None
 
 

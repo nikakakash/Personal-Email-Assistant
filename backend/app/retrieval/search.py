@@ -145,7 +145,7 @@ async def _keyword(
         "FROM message_chunks c JOIN email_threads t ON t.id = c.thread_id "
         "JOIN email_messages m ON m.id = c.message_id "
         f"WHERE {where} AND c.tsv @@ {_TSQUERY} "
-        "ORDER BY rank DESC, c.id LIMIT :limit"
+        "ORDER BY rank DESC, c.received_at DESC, c.id LIMIT :limit"
     )
     rows = (await session.execute(text(sql), params)).all()
     return [(row[0], float(row[1])) for row in rows]

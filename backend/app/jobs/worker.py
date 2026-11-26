@@ -104,8 +104,10 @@ from app.llm.factory import make_llm_client
 from app.prompts import PROMPT_VERSIONS
 from app.providers.mock_calendar import MockCalendarProvider
 from app.providers.mock_mail import MockFaults, MockMailProvider
+from app.retrieval.contextualize import LLMContextualizer
 from app.retrieval.embeddings import EmbeddingTransientError, make_embeddings_client
 from app.retrieval.indexer import index_message
+from app.retrieval.rerank import FastEmbedReranker
 
 log = logging.getLogger(__name__)
 
@@ -123,13 +125,19 @@ def make_deps(
     settings: Settings, sessionmaker: async_sessionmaker[AsyncSession], faults: MockFaults
 ) -> GraphDeps:
     """Runtime dependencies for this milestone: the configured LLM and the mock providers."""
+    llm = make_llm_client(settings, sessionmaker)
+    rag = settings.rag_enabled
     return GraphDeps(
-        llm=make_llm_client(settings, sessionmaker),
+        llm=llm,
         mail=MockMailProvider(sessionmaker, faults),
         calendar=MockCalendarProvider(sessionmaker, None, "UTC", faults),
         sessionmaker=sessionmaker,
         settings=settings,
-        embeddings=make_embeddings_client(settings, sessionmaker) if settings.rag_enabled else None,
+        embeddings=make_embeddings_client(settings, sessionmaker) if rag else None,
+        reranker=(
+            FastEmbedReranker() if rag and settings.retrieval_mode == "hybrid_rerank" else None
+        ),
+        contextualizer=LLMContextualizer(llm) if rag and settings.rag_contextualize else None,
     )
 
 
@@ -412,7 +420,7 @@ async def _work_index(deps: GraphDeps, job: Job) -> str:
         return "done"
     try:
         message_id = uuid.UUID(str(job.payload["message_id"]))
-        await index_message(deps.sessionmaker, message_id, deps.embeddings)
+        await index_message(deps.sessionmaker, message_id, deps.embeddings, deps.contextualizer)
         return "done"
     except EmbeddingTransientError:
         log.warning("job %s: embedding provider unavailable; retrying later", job.id)

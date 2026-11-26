@@ -15,12 +15,15 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import ChunkEmbedding, EmailMessage, MessageChunk
+from app.llm.client import BudgetExceeded, LLMError
+from app.mail.content import model_text
 from app.retrieval.chunking import Chunk, chunk_message
+from app.retrieval.contextualize import Contextualizer, MessageInfo
 from app.retrieval.embeddings import EmbeddingsClient
 
 log = logging.getLogger(__name__)
@@ -49,7 +52,10 @@ async def index_message(
     sessionmaker: async_sessionmaker[AsyncSession],
     message_id: uuid.UUID,
     embedder: EmbeddingsClient,
+    contextualizer: Contextualizer | None = None,
 ) -> IndexStats:
+    """With `contextualizer`, chunks that are new or changed (and so have no prefix yet) get
+    a model-written situating sentence before embedding. A failure there only skips the prefix."""
     async with sessionmaker() as session:
         msg = await session.get(EmailMessage, message_id)
         if msg is None:
@@ -61,6 +67,14 @@ async def index_message(
             received_at=msg.received_at,
             body_text=msg.body_text,
             body_html=msg.body_html,
+        )
+        info = MessageInfo(
+            provider_message_id=msg.provider_message_id,
+            sender=msg.sender,
+            to=list(msg.to_addrs),
+            subject=msg.subject,
+            date=msg.received_at.date().isoformat(),
+            body=model_text(msg.body_text, msg.body_html),
         )
         snapshot = {
             "account_id": msg.account_id,
@@ -91,10 +105,16 @@ async def index_message(
         old = existing.get(chunk.index)
         return old is not None and old.content_hash == chunk.content_hash
 
+    prefixes = {c.index: existing[c.index].context_prefix for c in chunks if unchanged(c)}
+
     def prefix(chunk: Chunk) -> str | None:
-        return existing[chunk.index].context_prefix if unchanged(chunk) else None
+        return prefixes.get(chunk.index)
 
     todo = [c for c in chunks if not (unchanged(c) and existing[c.index].id in embedded_ids)]
+    if contextualizer is not None:
+        for chunk in todo:
+            if prefix(chunk) is None:
+                prefixes[chunk.index] = await _contextualize(contextualizer, info, chunk)
     vectors: list[list[float]] = []
     if todo:
         texts = [embedding_text(c.text, prefix(c)) for c in todo]
@@ -147,15 +167,27 @@ async def index_message(
     return IndexStats(chunks=len(chunks), embedded=len(todo))
 
 
+async def _contextualize(
+    contextualizer: Contextualizer, info: MessageInfo, chunk: Chunk
+) -> str | None:
+    try:
+        return await contextualizer(info, chunk.text) or None
+    except (BudgetExceeded, LLMError) as exc:
+        log.warning("contextualize skipped (%s); indexing without a prefix", type(exc).__name__)
+        return None
+
+
 async def reindex_all(
     sessionmaker: async_sessionmaker[AsyncSession],
     embedder: EmbeddingsClient,
     *,
     account_id: str | None = None,
     force: bool = False,
+    contextualizer: Contextualizer | None = None,
 ) -> ReindexStats:
     """Index every stored message (optionally of one account). `force` first drops this
-    model's embeddings so everything is embedded again (after a chunking or model change)."""
+    model's embeddings so everything is embedded again (after a chunking or model change);
+    with a `contextualizer` it also drops the prefixes so they are written again."""
     query = select(EmailMessage.id).order_by(EmailMessage.received_at, EmailMessage.id)
     if account_id is not None:
         query = query.where(EmailMessage.account_id == account_id)
@@ -168,9 +200,15 @@ async def reindex_all(
                     ChunkEmbedding.model == embedder.model, ChunkEmbedding.chunk_id.in_(scope)
                 )
             )
+            if contextualizer is not None:
+                await session.execute(
+                    update(MessageChunk)
+                    .where(MessageChunk.message_id.in_(query))
+                    .values(context_prefix=None)
+                )
     total = ReindexStats()
     for n, message_id in enumerate(ids, 1):
-        stats = await index_message(sessionmaker, message_id, embedder)
+        stats = await index_message(sessionmaker, message_id, embedder, contextualizer)
         if not stats.missing:
             total.messages += 1
             total.chunks += stats.chunks

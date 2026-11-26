@@ -4,7 +4,8 @@ import pytest
 
 from app.prompts import PROMPT_VERSIONS, load_prompt
 
-NAMES = ["triage", "plan", "draft_reply", "draft_meeting"]
+NAMES = ["triage", "plan", "draft_reply", "draft_meeting", "contextualize"]
+WORKFLOW = ["triage", "plan", "draft_reply", "draft_meeting"]
 
 
 def test_prompts_have_versions_and_injection_rule() -> None:
@@ -15,7 +16,9 @@ def test_prompts_have_versions_and_injection_rule() -> None:
         assert p.version.startswith(f"{name}_v")
         assert p.name == name
         assert "untrusted" in p.system.lower()
-        assert "message:" in p.system and "chain-of-thought" in p.system
+        assert "chain-of-thought" in p.system
+        if name in WORKFLOW:
+            assert "message:" in p.system
         assert not p.system.startswith("---")
 
 

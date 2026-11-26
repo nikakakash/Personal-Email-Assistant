@@ -19,6 +19,7 @@ from typing import Any
 from app.config import Settings
 from app.llm.client import LLMClient
 from app.providers.interfaces import CalendarProvider, MailProvider
+from app.retrieval.contextualize import Contextualizer
 from app.retrieval.embeddings import EmbeddingsClient
 from app.retrieval.rerank import Reranker
 
@@ -39,3 +40,5 @@ class GraphDeps:
     # Retrieval over past email; None when RAG is disabled.
     embeddings: EmbeddingsClient | None = None
     reranker: Reranker | None = None
+    # Index-time chunk context (contextual retrieval); None unless RAG_CONTEXTUALIZE.
+    contextualizer: Contextualizer | None = None
