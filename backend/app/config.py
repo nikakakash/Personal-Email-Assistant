@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PLACEHOLDER = "replace-me"
@@ -64,7 +64,8 @@ class Settings(BaseSettings):
     voyage_api_key: SecretStr | None = None
     # hybrid_rerank adds the local cross-encoder over the top hybrid candidates.
     retrieval_mode: Literal["keyword", "vector", "hybrid", "hybrid_rerank"] = "hybrid"
-    retrieval_top_k: int = 5
+    # Past emails shown to the model; bounded so a typo cannot flood every prompt.
+    retrieval_top_k: int = Field(default=5, ge=1, le=20)
     # participants: only past mail that every external participant of the current thread was
     # party to (no cross-correspondent leakage, no CC fishing); mailbox: the whole account.
     retrieval_scope: Literal["participants", "mailbox"] = "participants"

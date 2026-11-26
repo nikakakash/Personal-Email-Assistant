@@ -1,4 +1,4 @@
-# Architecture (milestone 1: mock email)
+# Architecture (milestone 2: mock email + retrieval over past email)
 
 ```
  browser ──► web (Caddy :8080) ──/api/*──► api (FastAPI)
@@ -23,7 +23,7 @@ and a pending review survives.
 | `db` | `pgvector/pgvector:0.8.6-pg17-trixie` | app tables, the job queue, LangGraph checkpoints, the event log, the retrieval index |
 | `migrate` | backend | one-shot schema migration plus checkpoint setup, before `api`/`worker` start |
 | `api` | backend | HTTP API: login, review queue, decisions, preferences, flags, usage, SSE `/events`, dev tools |
-| `worker` | backend | job loop: `start_workflow` / `resume` jobs, leases, retries, crash recovery |
+| `worker` | backend | job loop: `start_workflow` / `resume` / `index_message` jobs, leases, retries, crash recovery; local embedding and rerank models (`modelcache` volume) |
 | `web` | Caddy + built SPA | serves the React app, proxies `/api/*` (SSE unbuffered) |
 
 ## Who owns what
@@ -42,6 +42,7 @@ and a pending review survives.
 | What the UI shows | projections from app tables (never checkpoints) | `app/api/views.py` |
 | Live updates | the append-only `workflow_events` log, streamed as SSE | `app/graphs/events.py`, `app/api/events.py` |
 | Secrets | backend settings only; never in graph state, prompts, responses or events | `app/config.py` |
+| Remembering past email (RAG): index, search, scope | the retrieval package and the `retrieve_history` node; boundaries enforced in code | `app/retrieval/`, `app/graphs/nodes/retrieve.py`, [rag.md](rag.md) |
 
 ## Reliability boundaries
 
@@ -68,11 +69,13 @@ and a pending review survives.
 ## Data flow of one email
 
 1. Ingestion stores the message. Owner-sent mail marks that thread's pending proposals stale.
-   Automated mail is skipped. Otherwise ingestion enqueues `start_workflow`.
+   Automated mail is skipped. Otherwise ingestion enqueues `start_workflow`. With RAG on, owner
+   and ordinary inbound mail also gets an `index_message` job.
 2. The worker runs the parent graph: `load_context` → `load_preferences` → `triage` →
    `record_triage`, then branches into ignore, notify (a review item) or the `response`
    subgraph.
-3. `response` loops `plan_next_step` → read tools / ask the owner / draft → `validate_proposal`
+3. `response` starts with `retrieve_history` (RAG; a no-op when off), then loops
+   `plan_next_step` → read tools / ask the owner / draft → `validate_proposal`
    → `persist_proposal` → `approval_interrupt` (the run pauses here; the checkpoint is in Postgres).
 4. The owner decides in the UI. The API records the approval and enqueues a `resume` job.
 5. The worker resumes: `preflight` → `execute_action` (executor and ledger) → `plan_next_step`

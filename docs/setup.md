@@ -114,7 +114,34 @@ docker compose -p email-assistant-e2e -f compose.yaml -f compose.e2e.yaml down -
 Each journey injects its own fixture, and fixtures cannot be injected twice. Always run
 `down -v` before re-running the suite.
 
-## 5. Triage evaluation (costs money)
+## 5. Retrieval over past email (RAG)
+
+Set `RAG_ENABLED=true` in `.env` and restart the stack. New mail is indexed by the worker;
+index mail that was stored earlier with:
+
+```bash
+docker compose run --rm worker python -m app reindex          # add --force after a model change
+```
+
+The local embedding model (about 65 MB) and the reranker (about 80 MB) download once into the
+`modelcache` volume. Design, settings and security boundaries: [rag.md](rag.md).
+
+### Retrieval evaluation (free)
+
+```bash
+cd backend
+uv run python ../evals/run_retrieval_eval.py --modes keyword,vector,hybrid,hybrid_rerank
+uv run python ../evals/run_retrieval_eval.py --check-baseline ../evals/retrieval/baseline.json
+# add Enron noise: a partial download is enough for about 17k messages
+curl -r 0-40000000 -o enron_head.tar.gz https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz
+uv run python ../evals/run_retrieval_eval.py --scope mailbox --enron enron_head.tar.gz --enron-limit 10000
+```
+
+It uses its own database (`email_assistant_eval`). `--embedders voyage` and `--contextualize`
+cost money and need `--yes`. The end-to-end draft eval, `evals/run_rag_draft_eval.py`, calls
+Claude (about $1.20) and also needs `--yes`.
+
+## 6. Triage evaluation (costs money)
 
 ```bash
 cd backend

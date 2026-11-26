@@ -73,6 +73,15 @@ def test_rag_is_off_by_default_with_local_embeddings(base_env: None) -> None:
     assert s.voyage_api_key is None
 
 
+@pytest.mark.parametrize("value", ["0", "21"])
+def test_retrieval_top_k_is_bounded(
+    base_env: None, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("RETRIEVAL_TOP_K", value)
+    with pytest.raises(ValidationError, match="retrieval_top_k"):
+        make()
+
+
 def test_outbound_enabled_rejects_placeholder_voyage_key(
     base_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
