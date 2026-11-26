@@ -14,6 +14,7 @@ from app.db.models import (
     ReviewItem,
     WorkflowRun,
 )
+from app.graphs.parent import GRAPH_VERSION
 from app.ingestion.ingest import ingest_message
 from app.providers.interfaces import NormalizedMessage
 
@@ -133,7 +134,7 @@ async def _seed_pending_proposal(
         await session.execute(select(EmailMessage).where(EmailMessage.provider_message_id == mid))
     ).scalar_one()
     run = WorkflowRun(
-        graph_thread_id=f"mock-account:{mid}:wf1",
+        graph_thread_id=f"mock-account:{mid}:{GRAPH_VERSION}",
         message_id=message.id,
         provider_thread_id=thread,
         graph_version="test",

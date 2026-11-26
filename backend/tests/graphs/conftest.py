@@ -22,13 +22,15 @@ from app.actions.proposals import active_revision
 from app.config import Settings
 from app.db.models import EmailMessage, Job, Owner, Proposal, ReviewItem, WorkflowRun
 from app.graphs.deps import GraphDeps
-from app.graphs.parent import build_parent_graph
+from app.graphs.parent import GRAPH_VERSION, build_parent_graph
 from app.graphs.state import EmailState
 from app.llm.client import LLMClient, Purpose
 from app.llm.scripted import ScriptedLLMClient
 from app.providers.interfaces import MailProvider
 from app.providers.mock_calendar import MockCalendarProvider
 from app.providers.mock_mail import MockFaults, MockMailProvider
+from app.retrieval.embeddings import EmbeddingsClient
+from app.retrieval.rerank import Reranker
 
 # Monday 23 Nov 2026, 08:00 UTC. The owner has no stored preferences, so the zone is UTC.
 NOW = datetime(2026, 11, 23, 8, 0, tzinfo=UTC)
@@ -57,7 +59,11 @@ class SeededRun:
 
     @property
     def config(self) -> dict[str, Any]:
-        return {"configurable": {"thread_id": f"mock-account:{self.provider_message_id}:wf1"}}
+        return {
+            "configurable": {
+                "thread_id": f"mock-account:{self.provider_message_id}:{GRAPH_VERSION}"
+            }
+        }
 
 
 @pytest.fixture
@@ -116,8 +122,13 @@ def make_deps(
         llm: LLMClient | None = None,
         outbound: bool = True,
         mail_provider: MailProvider | None = None,
+        embeddings: EmbeddingsClient | None = None,
+        reranker: Reranker | None = None,
+        **settings_overrides: Any,
     ) -> GraphDeps:
-        settings = Settings(_env_file=None, outbound_execution_enabled=outbound)  # type: ignore[call-arg]
+        settings = Settings(  # type: ignore[call-arg]
+            _env_file=None, outbound_execution_enabled=outbound, **settings_overrides
+        )
         return GraphDeps(
             llm=llm or ScriptedLLMClient(scripts or {}),
             mail=mail_provider or mail,
@@ -125,6 +136,8 @@ def make_deps(
             sessionmaker=sessionmaker,
             settings=settings,
             now=lambda: NOW,
+            embeddings=embeddings,
+            reranker=reranker,
         )
 
     return make

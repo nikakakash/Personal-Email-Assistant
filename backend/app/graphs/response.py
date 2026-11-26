@@ -94,6 +94,7 @@ from app.graphs.nodes.proposal import (
     route_after_review,
 )
 from app.graphs.nodes.reads import read_tools
+from app.graphs.nodes.retrieve import retrieve_history
 from app.graphs.nodes.validate import route_after_validate, validate_proposal
 from app.graphs.state import EmailState
 
@@ -114,6 +115,7 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
     g = StateGraph(EmailState, context_schema=GraphDeps)
 
     for name, node in [
+        ("retrieve_history", retrieve_history),
         ("plan_next_step", plan_next_step),
         ("read_tools", read_tools_with_events),
         ("persist_question", persist_question),
@@ -136,7 +138,8 @@ def build_response_graph() -> StateGraph[EmailState, GraphDeps, EmailState, Emai
     g.add_node("approval_interrupt", approval_interrupt)
     g.add_node("pause_interrupt", pause_interrupt)
 
-    g.add_edge(START, "plan_next_step")
+    g.add_edge(START, "retrieve_history")
+    g.add_edge("retrieve_history", "plan_next_step")
     g.add_conditional_edges(
         "plan_next_step",
         route_after_plan,

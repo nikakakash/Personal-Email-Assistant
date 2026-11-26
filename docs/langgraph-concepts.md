@@ -111,7 +111,7 @@ pause for days and resume in another process.
 - Tests: `InMemorySaver`. Worker: `AsyncPostgresSaver`
   ([`app/jobs/worker.py`](../backend/app/jobs/worker.py)). Its tables are created by
   `python -m app migrate` (`prepare_storage`).
-- Thread ID format: `{account_id}:{provider_message_id}:wf1`, one thread per triggering email.
+- Thread ID format: `{account_id}:{provider_message_id}:wf2`, one thread per triggering email.
 - The UI never reads checkpoints. Nodes project what the UI needs into app tables (review
   items, proposals, events), and the API reads those ([`app/api/views.py`](../backend/app/api/views.py)).
 

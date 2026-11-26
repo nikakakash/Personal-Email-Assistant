@@ -232,3 +232,44 @@ async def test_hybrid_rerank_reorders_by_reranker_score(
     )
     assert _ids(hits)[0] == corpus["lunch"].provider_message_id
     assert hits[0].score == 10.0 and len(hits) == 2
+
+
+async def test_participant_scope_only_returns_their_mail(
+    sessionmaker: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    alex = await _add(sessionmaker, "price agreed at 4500", sender="alex@example.com")
+    await _add(sessionmaker, "price agreed at 7000", sender="bob@example.com")
+    # The owner wrote to Alex: Alex is a recipient, given with a display name.
+    async with sessionmaker() as s, s.begin():
+        await s.execute(
+            text(
+                "update email_messages set to_addrs = array['Alex A <ALEX@example.com>'] "
+                "where id = :id"
+            ),
+            {"id": alex.id},
+        )
+    to_alex = await _add(sessionmaker, "confirming the price of 4500", sender="owner@example.com")
+    async with sessionmaker() as s, s.begin():
+        await s.execute(
+            text(
+                "update email_messages set to_addrs = array['Alex <alex@example.com>'] "
+                "where id = :id"
+            ),
+            {"id": to_alex.id},
+        )
+    for mode in ("keyword", "vector", "hybrid"):
+        hits = await search(
+            session,
+            EMB,
+            account_id="acct",
+            query="price agreed",
+            mode=mode,
+            participants=["Alex@Example.com"],
+        )
+        assert set(_ids(hits)) == {alex.provider_message_id, to_alex.provider_message_id}, mode
+
+
+async def test_empty_participant_scope_returns_nothing(
+    session: AsyncSession, corpus: dict[str, EmailMessage]
+) -> None:
+    assert await search(session, EMB, account_id="acct", query="price", participants=[]) == []

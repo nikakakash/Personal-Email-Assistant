@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.actions.reviews import answer_question, cancel_workflow
 from app.db.models import Job, Proposal, ReviewItem, WorkflowRun
+from app.graphs.parent import GRAPH_VERSION
 from app.ingestion.ingest import ingest_message
 from app.jobs.worker import run_once
 from app.llm.client import LLMCall, LLMResult, T
@@ -152,7 +153,7 @@ async def test_cancel_during_drafting_does_not_create_proposal(
     async with open_graph(checkpoints) as graph:
         assert await run_once(graph, make_deps(llm=llm), worker_id="w1", lease=LEASE)
         snap = await graph.aget_state(
-            {"configurable": {"thread_id": f"mock-account:{MID}:wf1"}}, subgraphs=True
+            {"configurable": {"thread_id": f"mock-account:{MID}:{GRAPH_VERSION}"}}, subgraphs=True
         )
 
     assert "draft_reply" in llm.purposes

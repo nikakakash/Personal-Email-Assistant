@@ -556,8 +556,8 @@ crash-recovery and time-travel debugging possible.
 |---|---|
 | Checkpointer | `AsyncPostgresSaver` in the worker; `InMemorySaver` in graph tests |
 | Its tables | `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, created by `python -m app migrate` |
-| `thread_id` | `f"{account_id}:{provider_message_id}:wf1"`: **one email = one run = one thread** |
-| `wf1` | `GRAPH_VERSION`. Changing the graph's shape bumps it, so old checkpoints are never resumed by incompatible code |
+| `thread_id` | `f"{account_id}:{provider_message_id}:wf2"`: **one email = one run = one thread** |
+| `wf2` | `GRAPH_VERSION`. Changing the graph's shape bumps it, so old checkpoints are never resumed by incompatible code |
 
 **Durability modes** control *when* a checkpoint is written:
 
@@ -700,7 +700,7 @@ state after each step. Values are abbreviated.
 ```python
 {"workflow_id": "04a0…", "account_id": "mock-account",
  "provider_message_id": "e2e-sched-m1", "provider_thread_id": "thr-e2e-sched"}
-# config thread_id: "mock-account:e2e-sched-m1:wf1"
+# config thread_id: "mock-account:e2e-sched-m1:wf2"
 ```
 
 **2. `load_context` → `load_preferences`** add context:
@@ -845,7 +845,7 @@ instead. What does the action ledger do, and why is the payload hash check still
 | **`interrupt(value)`** | pause the run and surface `value` | `ask.py`, `notify.py`, `proposal.py`, `pause.py` |
 | **`Command(resume=…)`** | continue a paused run with an answer | `jobs/worker.py` |
 | **Checkpointer** | saves state after each step | `AsyncPostgresSaver` in `jobs/worker.py` |
-| **`thread_id`** | identifies one run's checkpoints | `{account}:{message}:wf1` |
+| **`thread_id`** | identifies one run's checkpoints | `{account}:{message}:wf2` |
 | **Durability** | when checkpoints are written (`sync` here) | every `ainvoke` in `jobs/worker.py` |
 | **`ainvoke(None, …)`** | continue from the last checkpoint | crash recovery in `jobs/worker.py` |
 | **Projection** | copying graph facts into app tables for the UI | `jobs/projection.py`, `api/views.py` |

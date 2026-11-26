@@ -10,7 +10,8 @@
 - hybrid: reciprocal rank fusion (RRF, k=60) of both candidate lists.
 - hybrid_rerank: hybrid candidates re-scored by a cross-encoder.
 
-Every query is scoped to one account (mandatory) and can exclude the current thread. Results
+Every query is scoped to one account (mandatory) and can exclude the current thread and be
+limited to messages involving given participants. Results
 are one hit per message: its best-ranked chunk.
 """
 
@@ -62,13 +63,25 @@ def rrf_fuse(rankings: Sequence[Sequence[Any]], k: int = RRF_K) -> list[tuple[An
     return sorted(scores.items(), key=lambda item: (-item[1], str(item[0])))
 
 
+# The bare address of each sender/to/cc entry ("Name <a@x>" or "a@x"), lowercased.
+_PARTICIPANT_MATCH = (
+    "EXISTS (SELECT 1 FROM unnest(m.to_addrs || m.cc_addrs || ARRAY[m.sender]) AS p(addr) "
+    "WHERE coalesce(lower(substring(p.addr from '<([^>]+)>')), lower(btrim(p.addr))) "
+    "= ANY(:participants))"
+)
+
+
 def _filters(
     params: dict[str, Any],
     exclude_provider_thread_id: str | None,
     sender: str | None,
     since: datetime | None,
+    participants: Sequence[str] | None = None,
 ) -> str:
     clauses = ["c.account_id = :account_id"]
+    if participants is not None:
+        clauses.append(_PARTICIPANT_MATCH)
+        params["participants"] = sorted({p.strip().lower() for p in participants})
     if exclude_provider_thread_id is not None:
         clauses.append("t.provider_thread_id <> :exclude_thread")
         params["exclude_thread"] = exclude_provider_thread_id
@@ -91,6 +104,7 @@ def vector_candidates_sql(
     exclude_provider_thread_id: str | None = None,
     sender: str | None = None,
     since: datetime | None = None,
+    participants: Sequence[str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """The vector candidate query. `model` and `dim` are inlined (validated) so the planner
     can match the partial HNSW index `WHERE model = '<model>'` on `embedding::vector(dim)`."""
@@ -101,13 +115,14 @@ def vector_candidates_sql(
         "qvec": "[" + ",".join(repr(float(x)) for x in vector) + "]",
         "limit": limit,
     }
-    where = _filters(params, exclude_provider_thread_id, sender, since)
+    where = _filters(params, exclude_provider_thread_id, sender, since, participants)
     sql = (
         f"SELECT c.id AS chunk_id, e.embedding::vector({dim}) <=> CAST(:qvec AS vector({dim})) "
         "AS distance "
         "FROM chunk_embeddings e "
         "JOIN message_chunks c ON c.id = e.chunk_id "
         "JOIN email_threads t ON t.id = c.thread_id "
+        "JOIN email_messages m ON m.id = c.message_id "
         f"WHERE e.model = '{model}' AND {where} "
         f"ORDER BY e.embedding::vector({dim}) <=> CAST(:qvec AS vector({dim})) "
         "LIMIT :limit"
@@ -119,10 +134,13 @@ async def _keyword(
     session: AsyncSession, query: str, limit: int, filters: dict[str, Any]
 ) -> list[tuple[uuid.UUID, float]]:
     params: dict[str, Any] = {"query": query, "limit": limit, "account_id": filters["account_id"]}
-    where = _filters(params, filters["exclude"], filters["sender"], filters["since"])
+    where = _filters(
+        params, filters["exclude"], filters["sender"], filters["since"], filters["participants"]
+    )
     sql = (
         f"SELECT c.id, ts_rank_cd(c.tsv, {_TSQUERY}) AS rank "
         "FROM message_chunks c JOIN email_threads t ON t.id = c.thread_id "
+        "JOIN email_messages m ON m.id = c.message_id "
         f"WHERE {where} AND c.tsv @@ {_TSQUERY} "
         "ORDER BY rank DESC, c.id LIMIT :limit"
     )
@@ -147,6 +165,7 @@ async def _vector(
         exclude_provider_thread_id=filters["exclude"],
         sender=filters["sender"],
         since=filters["since"],
+        participants=filters["participants"],
     )
     # Keep scanning the HNSW graph until `limit` rows pass the filters (pgvector >= 0.8).
     await session.execute(text("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)"))
@@ -183,13 +202,16 @@ async def search(
     exclude_provider_thread_id: str | None = None,
     sender: str | None = None,
     since: datetime | None = None,
+    participants: Sequence[str] | None = None,
     reranker: Reranker | None = None,
 ) -> list[Hit]:
+    """`participants` (bare addresses) limits results to messages any of them sent or
+    received, so one correspondent's mail cannot surface in a reply to someone else."""
     if not account_id:
         raise ValueError("account_id is required: retrieval is always scoped to one account")
     if mode == "hybrid_rerank" and reranker is None:
         raise ValueError("mode hybrid_rerank needs a reranker")
-    if not query.strip() or k <= 0:
+    if not query.strip() or k <= 0 or (participants is not None and not participants):
         return []
     limit = max(MIN_CANDIDATES, 4 * k)
     filters = {
@@ -197,6 +219,7 @@ async def search(
         "exclude": exclude_provider_thread_id,
         "sender": sender,
         "since": since,
+        "participants": participants,
     }
 
     keyword = await _keyword(session, query, limit, filters) if mode != "vector" else []

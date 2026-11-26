@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     voyage_api_key: SecretStr | None = None
     retrieval_mode: Literal["keyword", "vector", "hybrid", "hybrid_rerank"] = "hybrid"
     retrieval_top_k: int = 5
+    # participants: only past mail a correspondent of the current thread sent or received
+    # (no cross-correspondent leakage); mailbox: the whole account.
+    retrieval_scope: Literal["participants", "mailbox"] = "participants"
     rag_rerank: bool = False
     rag_contextualize: bool = False
 

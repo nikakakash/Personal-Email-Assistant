@@ -20,6 +20,7 @@ from app.config import Settings
 from app.llm.client import LLMClient
 from app.providers.interfaces import CalendarProvider, MailProvider
 from app.retrieval.embeddings import EmbeddingsClient
+from app.retrieval.rerank import Reranker
 
 
 def _utc_now() -> datetime:
@@ -37,3 +38,4 @@ class GraphDeps:
     now: Callable[[], datetime] = field(default=_utc_now)
     # Retrieval over past email; None when RAG is disabled.
     embeddings: EmbeddingsClient | None = None
+    reranker: Reranker | None = None
