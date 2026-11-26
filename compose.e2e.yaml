@@ -19,6 +19,9 @@ x-e2e-env: &e2e-env
   SESSION_SECRET: e2e-session-secret-not-for-production
   APP_BASE_URL: http://127.0.0.1:8081
   WORKER_LEASE_SECONDS: "15"
+  # RAG on, with the deterministic hash embedder (no model download in CI).
+  RAG_ENABLED: "true"
+  EMBEDDINGS_PROVIDER: hash
 
 services:
   db:

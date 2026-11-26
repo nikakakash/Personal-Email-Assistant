@@ -1,0 +1,59 @@
+{
+  "id": "e2e-rag",
+  "thread": [
+    {
+      "provider_message_id": "e2e-rag-m1",
+      "provider_thread_id": "thr-e2e-rag",
+      "rfc_message_id": "<e2e-rag.1@mail.example.net>",
+      "sender": "milo@example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Mural invoice",
+      "body_text": "I'm preparing the invoice. Can you remind me what price we agreed for the mural?",
+      "body_html": null,
+      "received_at": "2026-11-20T09:00:00+00:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "respond"
+  },
+  "script": {
+    "triage": [
+      {
+        "classification": "respond",
+        "urgency": "normal",
+        "reason": "Asks for the agreed price.",
+        "evidence_refs": [
+          "message:e2e-rag-m1"
+        ],
+        "needs_clarification": false
+      }
+    ],
+    "plan": [
+      {
+        "action": "draft_reply",
+        "reason": "The price is in a past email."
+      },
+      {
+        "action": "finish",
+        "reason": "Nothing else to do."
+      }
+    ],
+    "draft_reply": [
+      {
+        "to": [
+          "milo@example.org"
+        ],
+        "cc": [],
+        "body_text": "Hi Milo,\n\nWe agreed on 4,500 euros, paint included.\n\nBest",
+        "evidence_refs": [
+          "message:e2e-rag-m1",
+          "history:e2e-rag-history-m1"
+        ]
+      }
+    ]
+  }
+}
