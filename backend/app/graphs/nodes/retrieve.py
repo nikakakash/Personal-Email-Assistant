@@ -18,6 +18,7 @@ Boundaries, enforced in code rather than by the prompt:
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from langgraph.runtime import Runtime
@@ -31,7 +32,7 @@ from app.llm.client import BudgetExceeded
 from app.mail.content import model_text
 from app.retrieval.chunking import clean_body
 from app.retrieval.embeddings import EmbeddingError
-from app.retrieval.search import SearchMode, search
+from app.retrieval.search import Hit, SearchMode, search
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +92,18 @@ async def retrieve_history(state: EmailState, runtime: Runtime[GraphDeps]) -> di
         log.exception("history search failed; continuing without it")
         return {"retrieved_context": [], "read_findings": [_finding("unavailable")]}
 
-    context = [
+    context = context_from_hits(hits)
+    await emit_now(
+        deps,
+        state["workflow_id"],
+        [("tool_result", {"tool": "search_history", "key": HISTORY_FINDING_KEY})],
+    )
+    return {"retrieved_context": context, "read_findings": [_finding("ok", len(context))]}
+
+
+def context_from_hits(hits: Sequence[Hit]) -> list[dict[str, Any]]:
+    """The JSON-serializable `retrieved_context` entries for search hits."""
+    return [
         {
             "ref": f"history:{h.provider_message_id}",
             "provider_message_id": h.provider_message_id,
@@ -104,9 +116,3 @@ async def retrieve_history(state: EmailState, runtime: Runtime[GraphDeps]) -> di
         }
         for h in hits
     ]
-    await emit_now(
-        deps,
-        state["workflow_id"],
-        [("tool_result", {"tool": "search_history", "key": HISTORY_FINDING_KEY})],
-    )
-    return {"retrieved_context": context, "read_findings": [_finding("ok", len(context))]}

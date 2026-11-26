@@ -18,7 +18,13 @@ def make_llm_client(
     if settings.llm_provider == "scripted":
         today = datetime.now(UTC).date()
         return ScriptedLLMClient(fixture_scripts(settings.fixtures_dir, today), by_step=True)
-    for name in ("model_triage", "model_plan", "model_draft", "model_contextualize"):
+    for name in (
+        "model_triage",
+        "model_plan",
+        "model_draft",
+        "model_contextualize",
+        "model_judge",
+    ):
         if getattr(settings, name) not in PRICES:
             raise ValueError(f"{name.upper()} is not a priced model: {getattr(settings, name)!r}")
     budget = BudgetGuard(sessionmaker, settings.daily_budget_usd)

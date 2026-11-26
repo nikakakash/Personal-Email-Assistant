@@ -126,6 +126,7 @@ def test_contextualize_uses_its_own_cheap_model(base_env: None) -> None:
     client = AnthropicLLMClient(AsyncAnthropic(api_key="x"), settings, None)  # type: ignore[arg-type]
     assert client._model_and_effort("contextualize") == ("claude-haiku-5-5", "low")
     assert client._model_and_effort("draft_reply") == ("claude-opus-5-5", "medium")
+    assert client._model_and_effort("judge") == ("claude-sonnet-5-5", "low")
 
 
 def test_worker_deps_follow_settings(

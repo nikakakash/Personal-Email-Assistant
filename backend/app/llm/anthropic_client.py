@@ -70,6 +70,8 @@ class AnthropicLLMClient:
             return s.model_plan, s.effort_plan
         if purpose == "contextualize":
             return s.model_contextualize, s.effort_contextualize
+        if purpose == "judge":
+            return s.model_judge, s.effort_judge
         return s.model_draft, s.effort_draft
 
     @staticmethod

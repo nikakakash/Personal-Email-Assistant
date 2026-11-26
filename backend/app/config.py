@@ -49,10 +49,13 @@ class Settings(BaseSettings):
     model_draft: str = "claude-opus-5-5"
     # Contextual retrieval writes one sentence per chunk: a small, cheap model is enough.
     model_contextualize: str = "claude-haiku-5-5"
+    # LLM-as-judge in evals (faithfulness of RAG drafts).
+    model_judge: str = "claude-sonnet-5-5"
     effort_triage: str = "low"
     effort_plan: str = "medium"
     effort_draft: str = "medium"
     effort_contextualize: str = "low"
+    effort_judge: str = "low"
 
     # Retrieval over past email (RAG). Off by default; see app/retrieval/.
     rag_enabled: bool = False
