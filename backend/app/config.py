@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     embeddings_provider: Literal["fastembed", "voyage", "hash"] = "fastembed"
     embed_model: str = "bge-small-en-v1.5"
     voyage_api_key: SecretStr | None = None
-    retrieval_mode: Literal["bm25", "vector", "hybrid", "hybrid_rerank"] = "hybrid"
+    retrieval_mode: Literal["keyword", "vector", "hybrid", "hybrid_rerank"] = "hybrid"
     retrieval_top_k: int = 5
     rag_rerank: bool = False
     rag_contextualize: bool = False
