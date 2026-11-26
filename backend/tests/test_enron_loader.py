@@ -4,6 +4,7 @@ import io
 import tarfile
 from pathlib import Path
 
+import pytest
 from evals.retrieval.load_enron import iter_messages, load_enron, parse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -55,6 +56,11 @@ def test_maildir_dedupes_skips_and_threads(tmp_path: Path) -> None:
     assert len(list(iter_messages(tmp_path, limit=1))) == 1
 
 
+def test_missing_source_fails_loudly(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        list(iter_messages(tmp_path / "nope.tar.gz", limit=1))
+
+
 def test_tarball_is_streamed(tmp_path: Path) -> None:
     archive = tmp_path / "enron.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
@@ -63,6 +69,9 @@ def test_tarball_is_streamed(tmp_path: Path) -> None:
             info.size = len(raw)
             tar.addfile(info, io.BytesIO(raw))
     assert len(list(iter_messages(archive, limit=10))) == 2
+    truncated = tmp_path / "partial.tar.gz"
+    truncated.write_bytes(archive.read_bytes()[:-40])  # like a ranged partial download
+    assert len(list(iter_messages(truncated, limit=10))) <= 2  # stops cleanly, no exception
 
 
 async def test_load_into_database(

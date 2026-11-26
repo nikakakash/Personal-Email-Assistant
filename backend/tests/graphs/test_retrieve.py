@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import EmailMessage, EmailThread, Proposal, ProposalRevision
+from app.db.models import EmailMessage, EmailThread, Proposal, ProposalRevision, ReviewItem
 from app.graphs.nodes.retrieve import HISTORY_FINDING_KEY, history_query
 from app.graphs.nodes.shared import history_text
 from app.graphs.nodes.validate import validate_payload
@@ -133,6 +133,13 @@ async def test_history_reaches_planner_and_drafter_and_can_be_cited(
         assert "agreed price for the meeting room is 4500" in content
     payload = await _revision_payload(sessionmaker)
     assert f"history:{past}" in payload["evidence_refs"]
+    # The review item carries the cited source for the "Sources used" panel.
+    async with sessionmaker() as s:
+        item = (await s.execute(select(ReviewItem))).scalar_one()
+    (source,) = item.payload["sources"]
+    assert source["ref"] == f"history:{past}"
+    assert source["sender"] == "alice@example.com" and source["date"] == "2026-10-01"
+    assert source["snippet"].startswith("Confirmed: the agreed price")  # body, not header
 
 
 async def test_rag_disabled_adds_nothing(

@@ -16,6 +16,7 @@ import hashlib
 import re
 import tarfile
 import uuid
+import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -88,6 +89,8 @@ def parse(raw: bytes) -> EnronMessage | None:
 
 def iter_messages(source: Path, limit: int) -> Iterator[EnronMessage]:
     """Unique, parseable messages from a maildir or a .tar.gz, at most `limit`."""
+    if not source.exists():
+        raise FileNotFoundError(f"Enron source not found: {source}")
     seen: set[str] = set()
 
     def accept(raw: bytes) -> EnronMessage | None:
@@ -99,19 +102,24 @@ def iter_messages(source: Path, limit: int) -> Iterator[EnronMessage]:
 
     count = 0
     if source.is_file():
-        with tarfile.open(source, mode="r|gz") as archive:  # streaming: no random access
-            for member in archive:
-                if not member.isfile() or member.size > MAX_FILE_BYTES:
-                    continue
-                handle = archive.extractfile(member)  # read into memory, never written to disk
-                if handle is None:
-                    continue
-                message = accept(handle.read())
-                if message is not None:
-                    yield message
-                    count += 1
-                    if count >= limit:
-                        return
+        # Streaming, no random access. A partial download (e.g. `curl -r 0-40000000`) is fine:
+        # reading stops cleanly where the truncated archive ends.
+        try:
+            with tarfile.open(source, mode="r|gz") as archive:
+                for member in archive:
+                    if not member.isfile() or member.size > MAX_FILE_BYTES:
+                        continue
+                    handle = archive.extractfile(member)  # read in memory, never written out
+                    if handle is None:
+                        continue
+                    message = accept(handle.read())
+                    if message is not None:
+                        yield message
+                        count += 1
+                        if count >= limit:
+                            return
+        except (EOFError, tarfile.ReadError, zlib.error):
+            return
         return
     for path in sorted(p for p in source.rglob("*") if p.is_file()):
         message = accept(path.read_bytes())

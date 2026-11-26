@@ -197,10 +197,20 @@ export const AvailabilityCheck = z.object({
   time_zone: z.string().nullable(),
   retrieved_at: z.string().nullable(),
 })
+/** A past email (RAG) the draft cites as history:<id>; untrusted text, shown as plain text. */
+export const HistorySource = z.object({
+  ref: z.string(),
+  sender: z.string(),
+  date: z.string(),
+  subject: z.string(),
+  snippet: z.string(),
+})
+export type HistorySource = z.infer<typeof HistorySource>
 export const ProposalItemPayload = z.object({
   proposal_kind: z.string(),
   revision: z.number(),
   availability: z.array(AvailabilityCheck).optional(),
+  sources: z.array(HistorySource).optional(),
 })
 
 /** A send_reply proposal payload (graphs/nodes/draft.py). */
