@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PLACEHOLDER = "replace-me"
@@ -47,9 +47,31 @@ class Settings(BaseSettings):
     model_triage: str = "claude-opus-5-5"
     model_plan: str = "claude-opus-5-5"
     model_draft: str = "claude-opus-5-5"
+    # Contextual retrieval writes one sentence per chunk: a small, cheap model is enough.
+    model_contextualize: str = "claude-haiku-5-5"
+    # LLM-as-judge in evals (faithfulness of RAG drafts).
+    model_judge: str = "claude-sonnet-5-5"
     effort_triage: str = "low"
     effort_plan: str = "medium"
     effort_draft: str = "medium"
+    effort_contextualize: str = "low"
+    effort_judge: str = "low"
+
+    # Retrieval over past email (RAG). Off by default; see app/retrieval/.
+    rag_enabled: bool = False
+    embeddings_provider: Literal["fastembed", "voyage", "hash"] = "fastembed"
+    embed_model: str = "bge-small-en-v1.5"
+    voyage_api_key: SecretStr | None = None
+    # hybrid_rerank adds the local cross-encoder over the top hybrid candidates.
+    retrieval_mode: Literal["keyword", "vector", "hybrid", "hybrid_rerank"] = "hybrid"
+    # Past emails shown to the model; bounded so a typo cannot flood every prompt.
+    retrieval_top_k: int = Field(default=5, ge=1, le=20)
+    # participants: only past mail that every external participant of the current thread was
+    # party to (no cross-correspondent leakage, no CC fishing); mailbox: the whole account.
+    retrieval_scope: Literal["participants", "mailbox"] = "participants"
+    # Index-time contextual retrieval (one model call per new chunk); needs a model provider.
+    # Turning it on later takes `python -m app reindex --force` for existing mail.
+    rag_contextualize: bool = False
 
     max_agent_steps: int = 10
     daily_budget_usd: Decimal = Decimal("2.00")
@@ -87,6 +109,7 @@ class Settings(BaseSettings):
             "session_secret": self.session_secret,
             "owner_passphrase": self.owner_passphrase,
             "anthropic_api_key": self.anthropic_api_key,
+            "voyage_api_key": self.voyage_api_key,
         }
         for name, secret in secrets.items():
             if secret is not None and secret.get_secret_value() == PLACEHOLDER:

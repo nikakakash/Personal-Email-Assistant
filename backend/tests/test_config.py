@@ -60,3 +60,32 @@ def test_api_bind_defaults_to_loopback_and_is_configurable(
     monkeypatch.setenv("API_PORT", "9000")
     container = Settings(_env_file=None)  # type: ignore[call-arg]
     assert (container.api_host, container.api_port) == ("0.0.0.0", 9000)
+
+
+def test_rag_is_off_by_default_with_local_embeddings(base_env: None) -> None:
+    s = make()
+    assert s.rag_enabled is False
+    assert s.embeddings_provider == "fastembed"
+    assert s.embed_model == "bge-small-en-v1.5"
+    assert (s.retrieval_mode, s.retrieval_top_k) == ("hybrid", 5)
+    assert s.rag_contextualize is False
+    assert (s.model_contextualize, s.effort_contextualize) == ("claude-haiku-5-5", "low")
+    assert s.voyage_api_key is None
+
+
+@pytest.mark.parametrize("value", ["0", "21"])
+def test_retrieval_top_k_is_bounded(
+    base_env: None, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("RETRIEVAL_TOP_K", value)
+    with pytest.raises(ValidationError, match="retrieval_top_k"):
+        make()
+
+
+def test_outbound_enabled_rejects_placeholder_voyage_key(
+    base_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OUTBOUND_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("VOYAGE_API_KEY", "replace-me")
+    with pytest.raises(ValidationError, match="placeholder"):
+        make()

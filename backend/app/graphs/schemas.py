@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-_EVIDENCE_RE = re.compile(r"(message|availability|thread|owner_input):[A-Za-z0-9._:@-]+")
+_EVIDENCE_RE = re.compile(r"(message|availability|thread|owner_input|history):[A-Za-z0-9._:@-]+")
 
 
 def _check_evidence(refs: list[str]) -> list[str]:
@@ -20,7 +20,7 @@ def _check_evidence(refs: list[str]) -> list[str]:
         if not _EVIDENCE_RE.fullmatch(ref):
             raise ValueError(
                 f"bad evidence ref {ref!r}: use message:<id>, availability:<key>, "
-                "thread:<id> or owner_input:<id>"
+                "thread:<id>, owner_input:<id> or history:<id>"
             )
     return refs
 
@@ -30,8 +30,8 @@ EvidenceRefs = Annotated[
     AfterValidator(_check_evidence),
     Field(
         description=(
-            "Sources for every fact used, as message:<id>, availability:<key>, thread:<id> "
-            "or owner_input:<id>."
+            "Sources for every fact used, as message:<id>, availability:<key>, thread:<id>, "
+            "owner_input:<id> or history:<id>."
         )
     ),
 ]

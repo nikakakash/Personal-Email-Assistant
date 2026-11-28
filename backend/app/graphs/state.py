@@ -62,6 +62,10 @@ class EmailState(TypedDict, total=False):
     read_findings: Annotated[list[dict[str, Any]], merge_by_key]
     owner_inputs: Annotated[list[dict[str, Any]], operator.add]
 
+    # Past email retrieved for this run (RAG): [{ref: "history:<id>", sender, subject, date,
+    # text, ...}]. Untrusted context; the only `history:` refs a draft may cite.
+    retrieved_context: list[dict[str, Any]]
+
     # Planning loop.
     next_action: str | None  # None once a read tool has consumed it
     step_count: int

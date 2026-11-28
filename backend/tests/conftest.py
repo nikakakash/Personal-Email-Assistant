@@ -28,6 +28,7 @@ from app.db.models import (
     ProposalRevision,
     WorkflowRun,
 )
+from app.graphs.parent import GRAPH_VERSION
 from app.main import create_app
 
 # psycopg async needs a selector event loop on Windows. pytest-asyncio 1.x removed the
@@ -157,7 +158,7 @@ def workflow_factory(session: AsyncSession) -> Callable[[], Awaitable[WorkflowRu
         session.add(message)
         await session.flush()
         run = WorkflowRun(
-            graph_thread_id=f"mock-account:m-{n}:wf1",
+            graph_thread_id=f"mock-account:m-{n}:{GRAPH_VERSION}",
             message_id=message.id,
             provider_thread_id=thread.provider_thread_id,
             graph_version="test",

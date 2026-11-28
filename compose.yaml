@@ -17,7 +17,7 @@ x-backend: &backend
 
 services:
   db:
-    image: postgres:17.6
+    image: pgvector/pgvector:0.8.6-pg17-trixie
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
@@ -66,6 +66,8 @@ services:
     <<: *backend
     command: ["python", "-m", "app", "worker"]
     restart: unless-stopped
+    volumes:
+      - modelcache:/cache
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -84,3 +86,4 @@ services:
 
 volumes:
   pgdata:
+  modelcache:

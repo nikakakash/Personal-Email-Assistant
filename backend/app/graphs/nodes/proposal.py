@@ -70,15 +70,36 @@ async def persist_proposal(state: EmailState, runtime: Runtime[GraphDeps]) -> di
     }
 
 
+SOURCE_SNIPPET_CHARS = 300
+
+
 def _review_context(state: EmailState, draft: dict[str, Any]) -> dict[str, Any]:
-    """When each availability finding the draft cites was read, for the meeting review screen."""
+    """Display context for the review screen: when each cited availability finding was read,
+    and the past emails (RAG) the draft cites, so the owner can check those facts."""
     cited = set(draft.get("evidence_refs") or [])
+    context: dict[str, Any] = {}
     availability = [
         {"key": f["key"], "time_zone": f.get("time_zone"), "retrieved_at": f.get("retrieved_at")}
         for f in state.get("read_findings") or []
         if f.get("kind") == "availability" and f.get("key") in cited
     ]
-    return {"availability": availability} if availability else {}
+    if availability:
+        context["availability"] = availability
+    sources = [
+        {
+            "ref": h["ref"],
+            "sender": h["sender"],
+            "date": h["date"],
+            "subject": h["subject"],
+            # The chunk starts with its From/To/Date/Subject line; show only the body.
+            "snippet": h["text"].split("\n", 1)[-1][:SOURCE_SNIPPET_CHARS],
+        }
+        for h in state.get("retrieved_context") or []
+        if h.get("ref") in cited
+    ]
+    if sources:
+        context["sources"] = sources
+    return context
 
 
 def route_after_persist_proposal(state: EmailState) -> Literal["approval_interrupt", "finish"]:

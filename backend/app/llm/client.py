@@ -9,7 +9,9 @@ from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
 
-Purpose = Literal["triage", "plan", "draft_reply", "draft_meeting"]
+Purpose = Literal[
+    "triage", "plan", "draft_reply", "draft_meeting", "embed", "contextualize", "judge"
+]
 
 
 @dataclass

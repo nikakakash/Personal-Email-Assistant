@@ -25,6 +25,7 @@ import { MeetingReview } from '@/components/MeetingReview'
 import { NotificationPanel } from '@/components/NotificationPanel'
 import { QuestionPanel } from '@/components/QuestionPanel'
 import { RetryButton } from '@/components/RetryButton'
+import { SourcesUsed } from '@/components/SourcesUsed'
 import { CancelButton, ReviewActions } from '@/components/ReviewActions'
 import { StatusBadge } from '@/components/StatusBadge'
 import { ThreadView } from '@/components/ThreadView'
@@ -36,6 +37,12 @@ type Item = z.infer<typeof ReviewItemDetailOut>
 
 const FINAL = new Set(['done_no_action', 'done_with_actions', 'failed', 'cancelled'])
 
+/** The cited past emails stored on the review item (none when RAG is off). */
+function sourcesOf(item: Item) {
+  const context = ProposalItemPayload.safeParse(item.payload)
+  return context.success ? (context.data.sources ?? []) : []
+}
+
 function ReplyReview({ workflowId, item, proposal }: { workflowId: string; item: Item; proposal: Proposal }) {
   const parsed = ReplyPayload.safeParse(proposal.payload)
   const [edits, setEdits] = useState<ReplyEdits | null>(parsed.success ? editsOf(parsed.data) : null)
@@ -44,6 +51,7 @@ function ReplyReview({ workflowId, item, proposal }: { workflowId: string; item:
   return (
     <div className="space-y-4">
       <DraftEditor payload={parsed.data} edits={edits} onChange={setEdits} />
+      <SourcesUsed sources={sourcesOf(item)} />
       <ReviewActions
         workflowId={workflowId}
         reviewed={{
@@ -66,6 +74,7 @@ function EventReview({ workflowId, item, proposal }: { workflowId: string; item:
   return (
     <div className="space-y-4">
       <MeetingReview payload={parsed.data} availability={context.success ? context.data.availability : []} />
+      <SourcesUsed sources={sourcesOf(item)} />
       <ReviewActions
         workflowId={workflowId}
         reviewed={{

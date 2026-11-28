@@ -1,0 +1,36 @@
+{
+  "id": "e2e-rag-history",
+  "thread": [
+    {
+      "provider_message_id": "e2e-rag-history-m1",
+      "provider_thread_id": "thr-e2e-rag-old",
+      "rfc_message_id": "<e2e-rag-history.1@mail.example.net>",
+      "sender": "milo@example.org",
+      "to": [
+        "owner@example.com"
+      ],
+      "cc": [],
+      "subject": "Mural quote",
+      "body_text": "Confirming what we agreed on the phone: the mural costs 4,500 euros, paint included.",
+      "body_html": null,
+      "received_at": "2026-10-02T10:00:00+00:00",
+      "headers": {}
+    }
+  ],
+  "label": {
+    "classification": "ignore"
+  },
+  "script": {
+    "triage": [
+      {
+        "classification": "ignore",
+        "urgency": "low",
+        "reason": "A confirmation; nothing to answer.",
+        "evidence_refs": [
+          "message:e2e-rag-history-m1"
+        ],
+        "needs_clarification": false
+      }
+    ]
+  }
+}

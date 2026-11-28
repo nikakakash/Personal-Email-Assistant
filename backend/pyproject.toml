@@ -7,10 +7,13 @@ dependencies = [
     "alembic>=1.20.1",
     "anthropic>=2.12.0",
     "fastapi>=0.165.0",
+    "fastembed>=0.9.1",
+    "httpx>=0.28.1",
     "itsdangerous>=2.2.0",
     "langgraph>=1.2.24",
     "langgraph-checkpoint-postgres>=3.2.1",
     "nh3>=0.3.8",
+    "pgvector>=0.5.1",
     "psycopg[binary,pool]>=3.3.9",
     "pydantic-settings>=2.16.3",
     "sqlalchemy[asyncio]>=2.1.9",
@@ -23,7 +26,7 @@ dependencies = [
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", ".."]  # ".." so tests can import evals/
 
 [tool.ruff]
 line-length = 100
@@ -39,7 +42,6 @@ plugins = ["pydantic.mypy"]
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "mypy>=2.4.1",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",

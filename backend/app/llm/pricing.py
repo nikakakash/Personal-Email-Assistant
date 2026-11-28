@@ -30,6 +30,8 @@ PRICES: dict[str, ModelPrice] = {
     "claude-haiku-5-5": _p("0.10", "0.50", "0.01", "0.125"),
     # Served by server-side fallback ("default") when the requested model declines.
     "claude-opus-4-8": _p("5", "25", "0.50", "6.25"),
+    # Embeddings: input tokens only. TODO(before release): re-verify against Voyage's pricing.
+    "voyage-3.5-lite": _p("0.02", "0", "0", "0"),
 }
 
 # Fail closed: a model we have no price for is charged at the highest known rate of each kind.

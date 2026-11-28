@@ -42,8 +42,8 @@ async def _events(sessionmaker: async_sessionmaker[AsyncSession], seeded: Seeded
 
 
 def test_graph_version_and_thread_id() -> None:
-    assert GRAPH_VERSION == "wf1"
-    assert graph_thread_id("acc", "m1") == "acc:m1:wf1"
+    assert GRAPH_VERSION == "wf2"
+    assert graph_thread_id("acc", "m1") == "acc:m1:wf2"
 
 
 async def test_ignore_route_finishes_no_action(

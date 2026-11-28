@@ -12,9 +12,10 @@ _DIR = Path(__file__).parent
 
 PROMPT_VERSIONS: dict[str, str] = {
     "triage": "triage_v1",
-    "plan": "plan_v1",
-    "draft_reply": "draft_reply_v1",
-    "draft_meeting": "draft_meeting_v1",
+    "plan": "plan_v2",
+    "draft_reply": "draft_reply_v2",
+    "draft_meeting": "draft_meeting_v2",
+    "contextualize": "contextualize_v1",
 }
 
 

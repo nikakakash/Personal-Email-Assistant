@@ -23,7 +23,7 @@ be, so the same state always takes the same path. It sends a valid draft to
 `persist_proposal`, the first invalid one back to `plan_next_step`, and a second one to `error`.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, time, timedelta
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
@@ -134,9 +134,14 @@ def _address_errors(
 
 
 def _known_evidence(
-    thread: ThreadSnapshot, findings: Sequence[dict[str, Any]], owner_inputs: Sequence[Any]
+    thread: ThreadSnapshot,
+    findings: Sequence[dict[str, Any]],
+    owner_inputs: Sequence[Any],
+    history_refs: Iterable[str] = (),
 ) -> set[str]:
     known = {f"message:{m.provider_message_id}" for m in thread.messages}
+    # Only past emails actually retrieved for this run may be cited (no invented history).
+    known |= {ref for ref in history_refs if ref.startswith("history:")}
     known.add(f"thread:{thread.provider_thread_id}")
     known |= {f"owner_input:{n}" for n in range(len(owner_inputs))}
     # Finding keys the model sees verbatim: `availability:<start>:<end>` and `thread:<version>`.
@@ -149,10 +154,11 @@ def _evidence_errors(
     thread: ThreadSnapshot,
     findings: Sequence[dict[str, Any]],
     owner_inputs: Sequence[Any],
+    history_refs: Iterable[str] = (),
 ) -> list[str]:
     if not refs:
         return ["missing_evidence"]
-    known = _known_evidence(thread, findings, owner_inputs)
+    known = _known_evidence(thread, findings, owner_inputs, history_refs)
     return [f"unknown_evidence:{_show(ref)}" for ref in refs if ref not in known]
 
 
@@ -296,6 +302,7 @@ def validate_payload(
     author: Author,
     owner_inputs: Sequence[Any] = (),
     scheduling: Mapping[str, Any] | None = None,
+    history_refs: Iterable[str] = (),
 ) -> list[str]:
     """Return error codes for `payload` (empty means valid). See the module docstring.
 
@@ -319,7 +326,9 @@ def validate_payload(
             payload, findings, allowed, scheduling=(scheduling or {}) if by_model else None
         )
     if by_model:
-        errors += _evidence_errors(payload["evidence_refs"], thread, findings, owner_inputs)
+        errors += _evidence_errors(
+            payload["evidence_refs"], thread, findings, owner_inputs, history_refs
+        )
     return errors
 
 
@@ -343,6 +352,7 @@ async def validate_proposal(state: EmailState, runtime: Runtime[GraphDeps]) -> d
             author="model",
             owner_inputs=list(state.get("owner_inputs") or []),
             scheduling=scheduling_preferences(state),
+            history_refs=[str(h["ref"]) for h in state.get("retrieved_context") or []],
         )
 
     if not errors:

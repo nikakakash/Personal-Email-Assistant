@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.actions.proposals import create_proposal
 from app.db.models import EmailMessage, EmailThread, Owner, ReviewItem, WorkflowRun
+from app.graphs.parent import GRAPH_VERSION
 from app.providers.mock_calendar import MockCalendarProvider
 from app.providers.mock_mail import MockFaults, MockMailProvider
 
@@ -107,7 +108,7 @@ def seed(session: AsyncSession) -> SeedFactory:
         session.add(message)
         await session.flush()
         run = WorkflowRun(
-            graph_thread_id=f"mock-account:m-{n}:wf1",
+            graph_thread_id=f"mock-account:m-{n}:{GRAPH_VERSION}",
             message_id=message.id,
             provider_thread_id=thread_id,
             graph_version="test",

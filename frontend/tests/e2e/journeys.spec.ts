@@ -1,5 +1,5 @@
 /**
- * Spec §20 journeys 1–8 and 10 against the full stack (compose E2E overlay: scripted model,
+ * Spec §20 journeys 1–8 and 10, plus RAG (11), against the full stack (compose E2E overlay: scripted model,
  * mock mail and calendar, outbound execution on). Fixtures live in evals/e2e-fixtures; each
  * journey injects its own, so they only need a fresh database, not a particular order.
  */
@@ -177,4 +177,22 @@ test('10: a manual reply in the thread makes the pending proposal stale', async 
   await expect(page.getByText('Stale', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Approve and send' })).toHaveCount(0)
   expect(await outbox(page, 'thr-e2e-stale')).toHaveLength(0)
+})
+
+test('11: a reply recalls an earlier email (RAG) and shows it under Sources used', async ({ page }) => {
+  // The earlier email is triaged "ignore" but indexed; its index job runs before the new run.
+  await inject(page, 'e2e-rag-history')
+  await waitForRun(page, 'Mural quote', 'done_no_action')
+  await inject(page, 'e2e-rag')
+  await waitForRun(page, 'Mural invoice')
+  await openFromQueue(page, 'Reply ready', 'milo@example.org')
+
+  const sources = page.getByRole('region', { name: 'Sources used' })
+  await expect(sources).toContainText('Mural quote')
+  await expect(sources).toContainText('the mural costs 4,500 euros')
+  await expect(page.getByRole('region', { name: 'Exact text to be sent' })).toContainText('4,500 euros')
+
+  await page.getByRole('button', { name: 'Approve and send' }).click()
+  await sent(page)
+  expect(await outbox(page, 'thr-e2e-rag')).toHaveLength(1)
 })

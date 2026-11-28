@@ -68,7 +68,8 @@ from app.graphs.nodes.triage import record_triage, route_after_triage, triage
 from app.graphs.response import build_response_graph
 from app.graphs.state import EmailState
 
-GRAPH_VERSION = "wf1"
+# wf2: the response subgraph starts with retrieve_history (RAG).
+GRAPH_VERSION = "wf2"
 
 
 def graph_thread_id(account_id: str, provider_message_id: str) -> str:

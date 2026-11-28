@@ -90,7 +90,10 @@ async def ingest_message(
     owner_identities: list[str],
     *,
     account_id: str = "mock-account",
+    index: bool = False,
 ) -> IngestResult:
+    """Store `msg` and queue its workflow. With `index`, also queue `index_message` for the
+    retrieval index (owner and ordinary inbound mail; never bounces or automated mail)."""
     if await repo.ingestion_paused(session):
         return IngestResult(status="paused")
 
@@ -98,7 +101,8 @@ async def ingest_message(
     content_hash = payload_hash(
         {"subject": msg.subject, "text": msg.body_text, "html": msg.body_html}
     )
-    if not await repo.insert_message(session, thread, msg, account_id, content_hash):
+    message_id = await repo.insert_message(session, thread, msg, account_id, content_hash)
+    if message_id is None:
         return IngestResult(status="duplicate")
 
     ids = await repo.thread_message_ids(session, thread.id)
@@ -112,15 +116,24 @@ async def ingest_message(
         )
     )
 
+    loop_risk, automated = _is_loop_risk(msg), _is_automated(msg)
+    if index and not loop_risk and not automated:
+        await enqueue(
+            session,
+            "index_message",
+            f"{account_id}:{msg.provider_message_id}:index_message",
+            # Only the row id: the worker must not mistake this for a workflow job.
+            {"message_id": str(message_id)},
+        )
+
     if is_owner_address(msg.sender, owner_identities):
         # A manual reply from the owner (e.g. in Gmail) invalidates pending proposals,
         # but never starts a workflow.
         await _mark_superseded(session, msg.provider_thread_id)
         return IngestResult(status="skipped_owner")
-    if _is_loop_risk(msg):
+    if loop_risk:
         return IngestResult(status="skipped_automated")
 
-    automated = _is_automated(msg)
     if not automated:  # a list post or an alert does not invalidate a pending reply
         await _mark_superseded(session, msg.provider_thread_id)
     job = await enqueue(
