@@ -1,0 +1,208 @@
+{
+  "corpus_messages": 151,
+  "reports": [
+    {
+      "embedder": "-",
+      "mode": "keyword",
+      "scope": "participants",
+      "queries": 60,
+      "recall_at_5": 0.95,
+      "recall_at_10": 0.95,
+      "mrr": 0.8986,
+      "ndcg_at_10": 0.8977,
+      "latency_p50_ms": 14.5,
+      "latency_p95_ms": 20.3,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.9605,
+        "superseded": 0.75
+      },
+      "misses_at_5": [
+        "q01",
+        "q17",
+        "q28",
+        "q36"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "vector",
+      "scope": "participants",
+      "queries": 60,
+      "recall_at_5": 0.9917,
+      "recall_at_10": 1.0,
+      "mrr": 0.9228,
+      "ndcg_at_10": 0.9375,
+      "latency_p50_ms": 29.3,
+      "latency_p95_ms": 36.1,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 1.0,
+        "superseded": 1.0
+      },
+      "misses_at_5": [
+        "q36"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "hybrid",
+      "scope": "participants",
+      "queries": 60,
+      "recall_at_5": 0.9917,
+      "recall_at_10": 1.0,
+      "mrr": 0.9047,
+      "ndcg_at_10": 0.9239,
+      "latency_p50_ms": 37.1,
+      "latency_p95_ms": 64.2,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 1.0,
+        "superseded": 1.0
+      },
+      "misses_at_5": [
+        "q36"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "hybrid_rerank",
+      "scope": "participants",
+      "queries": 60,
+      "recall_at_5": 0.9917,
+      "recall_at_10": 1.0,
+      "mrr": 0.9528,
+      "ndcg_at_10": 0.9579,
+      "latency_p50_ms": 256.3,
+      "latency_p95_ms": 386.2,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 1.0,
+        "superseded": 1.0
+      },
+      "misses_at_5": [
+        "q36"
+      ]
+    },
+    {
+      "embedder": "-",
+      "mode": "keyword",
+      "scope": "mailbox",
+      "queries": 60,
+      "recall_at_5": 0.875,
+      "recall_at_10": 0.925,
+      "mrr": 0.8462,
+      "ndcg_at_10": 0.852,
+      "latency_p50_ms": 15.6,
+      "latency_p95_ms": 25.0,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 0.7,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.9079,
+        "superseded": 0.5
+      },
+      "misses_at_5": [
+        "q01",
+        "q07",
+        "q13",
+        "q17",
+        "q28",
+        "q35",
+        "q36",
+        "q47",
+        "q49",
+        "q57"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "vector",
+      "scope": "mailbox",
+      "queries": 60,
+      "recall_at_5": 0.9583,
+      "recall_at_10": 0.975,
+      "mrr": 0.8719,
+      "ndcg_at_10": 0.894,
+      "latency_p50_ms": 41.9,
+      "latency_p95_ms": 81.7,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.8333,
+        "multi": 0.8,
+        "near-duplicate": 1.0,
+        "paraphrase": 1.0,
+        "superseded": 0.875
+      },
+      "misses_at_5": [
+        "q01",
+        "q12",
+        "q23",
+        "q36"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "hybrid",
+      "scope": "mailbox",
+      "queries": 60,
+      "recall_at_5": 0.9417,
+      "recall_at_10": 0.975,
+      "mrr": 0.8769,
+      "ndcg_at_10": 0.8972,
+      "latency_p50_ms": 45.7,
+      "latency_p95_ms": 87.6,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 0.9737,
+        "superseded": 0.5
+      },
+      "misses_at_5": [
+        "q01",
+        "q07",
+        "q17",
+        "q36"
+      ]
+    },
+    {
+      "embedder": "fastembed",
+      "mode": "hybrid_rerank",
+      "scope": "mailbox",
+      "queries": 60,
+      "recall_at_5": 0.975,
+      "recall_at_10": 0.975,
+      "mrr": 0.94,
+      "ndcg_at_10": 0.9387,
+      "latency_p50_ms": 535.7,
+      "latency_p95_ms": 660.1,
+      "recall_at_5_by_category": {
+        "collision": 1.0,
+        "identifier": 0.9167,
+        "multi": 1.0,
+        "near-duplicate": 1.0,
+        "paraphrase": 1.0,
+        "superseded": 0.75
+      },
+      "misses_at_5": [
+        "q01",
+        "q36"
+      ]
+    }
+  ]
+}
