@@ -55,18 +55,40 @@ correspondent's mail competes. Local models on CPU, `evals/run_retrieval_eval.py
 
 | mode | recall@5 | MRR | nDCG@10 | p50 latency |
 |---|---|---|---|---|
-| keyword (Postgres FTS) | 0.875 | 0.851 | 0.841 | 12 ms |
-| vector (bge-small) | 0.958 | 0.872 | 0.894 | 30 ms |
-| hybrid (RRF) | 0.958 | 0.874 | 0.891 | 34 ms |
-| **hybrid + cross-encoder rerank** | **0.975** | **0.940** | **0.939** | 494 ms |
+| keyword (Postgres FTS, BM25 IDF) | 0.875 | 0.846 | 0.852 | 16 ms |
+| vector (bge-small) | 0.958 | 0.872 | 0.894 | 42 ms |
+| hybrid (RRF) | 0.942 | 0.877 | 0.897 | 46 ms |
+| **hybrid + cross-encoder rerank** | **0.975** | **0.940** | **0.939** | 536 ms |
+
+**Under realistic noise.** The same 60 queries, with 3,000 real Enron emails added to the
+mailbox (3,151 messages, 3,498 chunks; `--enron … --enron-limit 3000`):
+
+| mode | recall@5 | MRR | nDCG@10 | p50 latency |
+|---|---|---|---|---|
+| keyword, plain `ts_rank_cd` (before) | 0.408 | 0.203 | 0.272 | 29 ms |
+| keyword, BM25 IDF (now) | 0.775 | 0.727 | 0.725 | 21 ms |
+| vector (bge-small) | 0.808 | 0.796 | 0.800 | 30 ms |
+| hybrid (RRF) | 0.858 | 0.778 | 0.794 | 48 ms |
+| **hybrid + cross-encoder rerank** | **0.933** | **0.926** | **0.913** | 3.8 s |
 
 What we learned:
-- **Fusion and reranking do different jobs.** Fusion rescues a weak embedder (hash vectors go
-  from 0.69 to 0.89 recall@5). With a good embedder, fusion barely moves recall. The
-  cross-encoder is what improves ranking: MRR goes from 0.87 to 0.94, for about 0.5 s of CPU
-  per search.
-- **Keyword search still wins on exact identifiers** (booking codes, ticket numbers). That is
-  why hybrid stays the default when the reranker's latency is unwanted.
+- **The noise test found a real bug.** Postgres's `ts_rank_cd` has no IDF. Long Enron mail
+  that repeated a question's common words ("cost", "say") outranked the one email holding
+  its rare, decisive word ("hosting"). Keyword recall@5 collapsed to 0.41 and dragged hybrid
+  below vector alone. Weighting each word by its BM25 IDF fixed it: keyword 0.41 → 0.78,
+  hybrid 0.72 → 0.86. The small clean set had hidden this entirely.
+- **Under noise, the reranker matters most.** It turns 0.86 into 0.93 recall@5 and lifts MRR
+  from 0.78 to 0.93. Its CPU cost grows with chunk length (about 0.5 s on short synthetic
+  mail, 3.8 s on long Enron chunks), so it is opt-in (`RETRIEVAL_MODE=hybrid_rerank`), and
+  a GPU or a hosted reranker would be the production choice.
+- **Fusion rescues a weak embedder** (hash vectors go from 0.69 to 0.89 recall@5 on the clean
+  set). With a good embedder on clean data, it barely moves recall. With noise, it adds about
+  0.05.
+- **Vector numbers vary a little between runs.** Three identical Enron runs gave vector
+  recall@5 of 0.73, 0.81 and 0.78. HNSW was not the cause (exact search matched it); the
+  local CPU embedder is not bit-for-bit deterministic, and near-ties among thousands of
+  similar emails flip. On 60 queries, 0.04 is two or three queries. Keyword results are
+  identical run to run.
 - **The remaining misses are superseded facts**, where both the old and the new message are
   needed in the top 5.
 - **The participant scope (the default) is nearly saturated** at recall@5 of about 0.99,

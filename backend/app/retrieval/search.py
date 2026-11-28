@@ -1,9 +1,12 @@
 """Search the retrieval index: keyword, vector, hybrid (reciprocal rank fusion) and rerank.
 
-- keyword: Postgres full-text search (`ts_rank_cd` over the generated `tsv` column). The
-  question's words are OR-ed, so a natural-language question still matches; ranking rewards
-  documents that contain more of them, close together. This is not BM25, but it fills the
-  same role: exact names, numbers and identifiers that embeddings blur.
+- keyword: Postgres full-text search over the generated `tsv` column. Any of the question's
+  words can match, and a chunk scores the sum of the BM25 IDF of the distinct query words it
+  contains, so a rare word (a name, an identifier, "hosting") outweighs common ones repeated
+  many times. `ts_rank_cd` (length-normalized) only breaks ties. This is BM25 without term
+  frequency or length saturation, and it fills the same role: exact names, numbers and
+  identifiers that embeddings blur. Plain `ts_rank_cd` has no IDF and collapsed under
+  realistic noise (Enron eval: recall@5 0.41).
 - vector: cosine distance over the model's partial HNSW index (`embedding::vector(dim)`),
   with pgvector's iterative scan, so the account and thread filters cannot starve the
   result list.
@@ -32,6 +35,7 @@ SearchMode = Literal["keyword", "vector", "hybrid", "hybrid_rerank"]
 RRF_K = 60
 MIN_CANDIDATES = 30
 RERANK_POOL = 20
+MAX_QUERY_TERMS = 128  # bounds the per-term document-frequency lookups of one keyword query
 _SAFE_MODEL = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
 # plainto_tsquery normalizes the text safely (no operator injection); its AND-ed lexemes are
@@ -140,12 +144,30 @@ async def _keyword(
     where = _filters(
         params, filters["exclude"], filters["sender"], filters["since"], filters["participants"]
     )
+    params["max_terms"] = MAX_QUERY_TERMS
     sql = (
-        f"SELECT c.id, ts_rank_cd(c.tsv, {_TSQUERY}) AS rank "
+        # The query's distinct lexemes (same parser as the index), each with its BM25 IDF
+        # over this account's chunks: ln(1 + (N - df + 0.5) / (df + 0.5)).
+        "WITH terms AS ("
+        "  SELECT DISTINCT lex FROM unnest(tsvector_to_array(to_tsvector('english', :query)))"
+        "  AS lex LIMIT :max_terms"
+        "), n AS ("
+        "  SELECT count(*)::float AS total FROM message_chunks WHERE account_id = :account_id"
+        "), weighted AS ("
+        "  SELECT quote_literal(terms.lex)::tsquery AS tq,"
+        "         ln(1 + (n.total - d.df + 0.5) / (d.df + 0.5)) AS idf"
+        "  FROM terms CROSS JOIN n CROSS JOIN LATERAL ("
+        "    SELECT count(*)::float AS df FROM message_chunks d"
+        "    WHERE d.account_id = :account_id AND d.tsv @@ quote_literal(terms.lex)::tsquery"
+        "  ) d"
+        ") "
+        f"SELECT c.id, sum(w.idf) AS rank, ts_rank_cd(c.tsv, {_TSQUERY}, 1) AS tie "
         "FROM message_chunks c JOIN email_threads t ON t.id = c.thread_id "
         "JOIN email_messages m ON m.id = c.message_id "
-        f"WHERE {where} AND c.tsv @@ {_TSQUERY} "
-        "ORDER BY rank DESC, c.received_at DESC, c.id LIMIT :limit"
+        "JOIN weighted w ON c.tsv @@ w.tq "
+        f"WHERE {where} "
+        "GROUP BY c.id "
+        "ORDER BY rank DESC, tie DESC, c.received_at DESC, c.id LIMIT :limit"
     )
     rows = (await session.execute(text(sql), params)).all()
     return [(row[0], float(row[1])) for row in rows]

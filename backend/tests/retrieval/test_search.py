@@ -90,6 +90,36 @@ async def test_keyword_matches_any_word_of_a_question(
     assert hits[0].keyword_rank == 1 and hits[0].vector_rank is None
 
 
+async def test_keyword_rare_word_beats_repeated_common_words(
+    sessionmaker: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    # Regression (Enron noise eval): plain ts_rank_cd has no IDF, so long mail that repeats the
+    # question's common words outranked the one email holding its rare, decisive word.
+    common = " ".join(["The cost we say would be the annual cost, as we say every year."] * 12)
+    for _ in range(8):
+        await _add(sessionmaker, common)
+    target = await _add(sessionmaker, "Hosting is 240 a year.")
+    hits = await search(
+        session,
+        EMB,
+        account_id="acct",
+        query="What did we say the annual hosting would cost?",
+        mode="keyword",
+    )
+    assert _ids(hits)[0] == target.provider_message_id
+
+
+async def test_keyword_ignores_other_accounts_for_term_weights(
+    sessionmaker: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    # Document frequencies come from the searched account only, and an empty query is harmless.
+    mine = await _add(sessionmaker, "The zephyr shipment arrives Monday.")
+    await _add(sessionmaker, "zephyr zephyr zephyr", account="other")
+    hits = await search(session, EMB, account_id="acct", query="zephyr", mode="keyword")
+    assert _ids(hits) == [mine.provider_message_id]
+    assert await search(session, EMB, account_id="acct", query="the and of", mode="keyword") == []
+
+
 async def test_vector_mode(session: AsyncSession, corpus: dict[str, EmailMessage]) -> None:
     hits = await search(session, EMB, account_id="acct", query="lunch Friday", mode="vector")
     assert _ids(hits)[0] == corpus["lunch"].provider_message_id
